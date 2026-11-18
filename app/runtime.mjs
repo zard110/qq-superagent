@@ -322,7 +322,7 @@ export class Runtime {
             "SELECT body FROM records WHERE bucket='run' AND id!=? AND json_extract(body,'$.ticket')=? ORDER BY rowid LIMIT 1",
           )
           .get(id, run.ticket)
-        if (previous && JSON.parse(previous.body).executor !== 'harness') {
+        if (previous && !['capability', 'harness'].includes(JSON.parse(previous.body).executor)) {
           run.executor = 'legacy'
           s.put('run', id, run)
           return

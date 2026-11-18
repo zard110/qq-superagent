@@ -45,10 +45,6 @@ async function ensure(group) {
   }
   if (!Object.keys(JSON.parse(members) || {}).some((id) => id.startsWith(app)))
     await docker('network', 'connect', '--alias', 'app', net, app)
-  const running = (await docker('ps', '-q', '--filter', 'label=' + label)).stdout
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
   let state = await docker('inspect', '--format', '{{.State.Status}}', name)
     .then((v) => v.stdout.trim())
     .catch(() => 'missing')
@@ -64,11 +60,18 @@ async function ensure(group) {
     }
   }
   if (state === 'running') return name
+  const running = (await docker('ps', '--format', '{{.Names}}', '--filter', 'label=' + label)).stdout
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
   if (running.length >= 2) {
-    const candidate = [...idle].filter(([g]) => !active.has(g)).sort((a, b) => a[1] - b[1])[0]
+    const candidate = running
+      .map((n) => n.slice(prefix.length))
+      .filter((g) => valid(g) && !active.has(g))
+      .sort((a, b) => (idle.get(a) || 0) - (idle.get(b) || 0))[0]
     if (!candidate) throw Object.assign(Error('等待群沙箱空位'), { status: 429 })
-    await docker('stop', '-t', '2', prefix + candidate[0])
-    idle.delete(candidate[0])
+    await docker('stop', '-t', '2', prefix + candidate)
+    idle.delete(candidate)
   }
   if (state === 'missing') {
     await docker(
@@ -83,6 +86,9 @@ async function ensure(group) {
       net,
       '--pull=never',
       '--init',
+      '--read-only',
+      '--tmpfs',
+      '/tmp:rw,nosuid,nodev,size=256m',
       '--cap-drop=ALL',
       '--security-opt=no-new-privileges',
       '--memory=1536m',

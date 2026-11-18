@@ -130,6 +130,34 @@ const ext = {
   'image/jpeg': 'jpg',
   'application/pdf': 'pdf',
 }
+// Node fetch limits the wait for response headers to five minutes. A group turn may take eight.
+function groupRequest(payload) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      new URL('/group', runner()),
+      { method: 'POST', signal: AbortSignal.timeout(495000) },
+      (res) => {
+        let size = 0
+        const chunks = []
+        res.on('data', (chunk) => {
+          size += chunk.length
+          if (size > 36e6) res.destroy(Error('沙箱结果过大'))
+          else chunks.push(chunk)
+        })
+        res.on('error', reject)
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks)) })
+          } catch (err) {
+            reject(err)
+          }
+        })
+      },
+    )
+    req.on('error', reject)
+    req.end(JSON.stringify(payload))
+  })
+}
 export async function executeHarness(runtime, run, ref) {
   const { store, caps } = runtime,
     m = run.m,
@@ -177,41 +205,40 @@ export async function executeHarness(runtime, run, ref) {
   const session = key(m.group, run.route?.session || run.ticket)
   grants.set(token, { group, model, caps, ctx, calls: 0 })
   try {
-    const r = await fetch(runner() + '/group', {
-      method: 'POST',
-      body: JSON.stringify({
-        group,
-        ticket: session,
-        run: run.id,
-        token,
-        model: model.model,
-        official: model.kind === 'deepseek',
-        inputs,
-        question: publicShareText(m.text),
-        references: ref.parts
-          .filter((p) => ['text', 'card'].includes(p.type))
-          .slice(0, 20)
-          .map((p) => ({
-            type: p.type,
-            title: p.title,
-            site: p.site,
-            url: p.url,
-            summary: p.summary,
-            text: p.text?.slice(0, 1000),
-          })),
-        requiresFile: run.route?.requiresFile,
-        history: history
-          .map((v) => [
-            publicShareText(v.m.text)?.slice(0, 1200),
-            publicShareText(v.answer)?.slice(0, 1500),
-          ])
-          .reverse(),
-      }),
-      signal: AbortSignal.timeout(495000),
+    const r = await groupRequest({
+      group,
+      ticket: session,
+      run: run.id,
+      token,
+      model: model.model,
+      official: model.kind === 'deepseek',
+      inputs,
+      question: publicShareText(m.text),
+      persona: config.groups[m.group]?.persona || config.persona,
+      sender: { name: m.nickname || store.member(m.group, m.author)?.name, role: m.role },
+      mentions: (m.mentions || []).map((u) => ({ name: u.name, bot: u.self || u.bot })),
+      references: ref.parts
+        .filter((p) => ['text', 'card'].includes(p.type))
+        .slice(0, 20)
+        .map((p) => ({
+          type: p.type,
+          title: p.title,
+          site: p.site,
+          url: p.url,
+          summary: p.summary,
+          text: p.text?.slice(0, 1000),
+        })),
+      requiresFile: run.route?.requiresFile,
+      history: history
+        .map((v) => [
+          publicShareText(v.m.text)?.slice(0, 1200),
+          publicShareText(v.answer)?.slice(0, 1500),
+        ])
+        .reverse(),
     })
     if (r.status === 429) throw new Pending('等待群工作区')
-    const out = await r.json()
-    if (!r.ok || out.error) throw Error(out.error || 'Harness 执行失败')
+    const out = r.body
+    if (r.status !== 200 || out.error) throw Error(out.error || 'Harness 执行失败')
     let artifact
     if (out.artifact)
       artifact = caps.save(m.group, out.artifact.mime, Buffer.from(out.artifact.data, 'base64'))
@@ -226,7 +253,11 @@ export async function executeHarness(runtime, run, ref) {
         data: { artifact },
       },
     })
-    return { text: out.text, artifact }
+    const text = String(out.text || '').replace(
+      /\[([^\]]+)\]\((?:sandbox:|file:|\/?work\/|\.?\/?outputs\/)[^)]+\)/gi,
+      '$1',
+    )
+    return { text, artifact }
   } catch (e) {
     if (!(e instanceof Pending))
       store.put('step', key(run.id, 'harness-error'), {

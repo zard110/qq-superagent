@@ -7,9 +7,9 @@ export async function decideConversation(runtime, run) {
   const parents = m.refs.map((id) => store.lookup(m.group, id)).filter(Boolean)
   const recent = store.db
     .prepare(
-      "SELECT body FROM records WHERE bucket='run' AND id!=? AND json_extract(body,'$.m.group')=? ORDER BY rowid DESC LIMIT 12",
+      "SELECT body FROM records WHERE bucket='run' AND id!=? AND json_extract(body,'$.m.group')=? AND json_extract(body,'$.m.at')<=? ORDER BY rowid DESC LIMIT 12",
     )
-    .all(run.id, m.group)
+    .all(run.id, m.group, m.at)
     .map((r) => JSON.parse(r.body))
   const candidates = new Map()
   for (const message of parents) {
@@ -25,7 +25,7 @@ export async function decideConversation(runtime, run) {
     candidates.set(other.m.thread, other)
   }
   const options = [...candidates.values()].slice(0, 8)
-  const object = parents.map((p) => ({
+  const object = [m, ...parents].map((p) => ({
     who: p.author,
     thread: p.thread,
     parts: p.parts.map((v) => ({ type: v.type, title: v.title, mime: v.mime })),
@@ -75,9 +75,25 @@ export async function decideConversation(runtime, run) {
   if (!['chat', 'continue', 'new', 'clarify'].includes(d.action)) throw Error('会话路由无效')
   const c = Number.isInteger(d.candidate) ? options[d.candidate] : null
   if (d.action === 'continue' && !c) d.action = 'clarify'
+  if (c && parents.length && d.action === 'continue' && !parents.some((p) => p.thread === c.m.thread)) {
+    d.action = 'clarify'
+    d.question = '你是要接着处理引用的内容，还是要继续另一项任务？'
+  }
   if (d.action === 'continue' && c && !parents.length && c.m.author !== m.author) {
     d.action = 'clarify'
     d.question = '你想继续哪位群友的任务？请引用对应的消息或作品。'
+  }
+  let session = c?.route?.session || c?.ticket
+  if (d.action === 'continue' && c && !session) {
+    const previous = store.db
+      .prepare(
+        "SELECT body FROM records WHERE bucket='run' AND json_extract(body,'$.m.group')=? AND json_extract(body,'$.m.thread')=? AND json_extract(body,'$.executor')='harness' AND json_extract(body,'$.ticket') IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(m.group, c.m.thread)
+    if (previous) {
+      const prior = JSON.parse(previous.body)
+      session = prior.route?.session || prior.ticket
+    }
   }
   const source = parents[0]?.id || (c?.artifact ? key(c.id, 'reply') : c?.m.id)
   return {
@@ -101,6 +117,6 @@ export async function decideConversation(runtime, run) {
     question: String(d.question || '你想继续处理哪条消息或哪份作品？').slice(0, 200),
     requiresFile: d.requiresFile === true,
     thread: d.action === 'new' || (!c && !parents.length) ? key(m.group, m.id) : c?.m.thread || m.thread,
-    session: d.action === 'continue' && c?.ticket ? c.route?.session || c.ticket : undefined,
+    session: d.action === 'continue' ? session : undefined,
   }
 }
