@@ -71,7 +71,9 @@ export class Store {
   }
   put(bucket, id, v) {
     this.db
-      .prepare('INSERT INTO records VALUES(?,?,?) ON CONFLICT(bucket,id) DO UPDATE SET body=excluded.body')
+      .prepare(
+        'INSERT INTO records VALUES(?,?,?) ON CONFLICT(bucket,id) DO UPDATE SET body=excluded.body',
+      )
       .run(bucket, id, JSON.stringify(v))
     return v
   }
@@ -92,7 +94,7 @@ export class Store {
   nextDelivery() {
     const row = this.db
       .prepare(
-        "SELECT body FROM records WHERE bucket='out' AND json_extract(body,'$.status')='pending' AND coalesce(json_extract(body,'$.after'),0)<=? ORDER BY rowid LIMIT 1",
+        "SELECT o.body FROM records o WHERE o.bucket='out' AND json_extract(o.body,'$.status')='pending' AND coalesce(json_extract(o.body,'$.after'),0)<=? AND (json_extract(o.body,'$.previous') IS NULL OR EXISTS(SELECT 1 FROM records p WHERE p.bucket='out' AND p.id=json_extract(o.body,'$.previous') AND json_extract(p.body,'$.status')='sent')) ORDER BY o.rowid LIMIT 1",
       )
       .get(Date.now())
     return row && JSON.parse(row.body)
@@ -108,9 +110,10 @@ export class Store {
     this.db.prepare('DELETE FROM records WHERE bucket=? AND id=?').run(bucket, id)
   }
   message(m) {
-    const searchable = [m.text, ...m.parts.flatMap((p) => [p.text, p.title, p.summary]).filter(Boolean)].join(
-      '\n',
-    )
+    const searchable = [
+      m.text,
+      ...m.parts.flatMap((p) => [p.text, p.title, p.summary]).filter(Boolean),
+    ].join('\n')
     return this.db
       .prepare('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?)')
       .run(m.group, m.id, m.idx, m.author, m.at, searchable, m.thread, JSON.stringify(m)).changes
@@ -143,7 +146,11 @@ export class Store {
       )
   }
   observeMembers(m) {
-    this.rememberMember(m.group, { id: m.author, name: m.nickname, username: m.username, role: m.role }, m.at)
+    this.rememberMember(
+      m.group,
+      { id: m.author, name: m.nickname, username: m.username, role: m.role },
+      m.at,
+    )
     for (const member of m.mentions || []) this.rememberMember(m.group, member, m.at)
   }
   member(g, id) {
@@ -181,7 +188,15 @@ export class Store {
   }
   history(
     g,
-    { keyword = '', author = '', from = '', until = '9999', thread = '', limit = 12, excludeId = '' } = {},
+    {
+      keyword = '',
+      author = '',
+      from = '',
+      until = '9999',
+      thread = '',
+      limit = 12,
+      excludeId = '',
+    } = {},
   ) {
     return this.db
       .prepare(

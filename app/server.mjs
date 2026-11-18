@@ -4,7 +4,7 @@ import { join, resolve, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { Store, persona } from './store.mjs'
-import { Capabilities } from './capabilities.mjs'
+import { Capabilities, Pending } from './capabilities.mjs'
 import { Runtime } from './runtime.mjs'
 import { QQ } from './qq.mjs'
 import { startGateway, executeHarness } from './harness.mjs'
@@ -23,7 +23,7 @@ const store = new Store(join(dir, 'bot.sqlite')),
   app = new Runtime(store, caps),
   qq = new QQ(app)
 qq.enabled = true
-if (process.env.RUNNER_URL) startGateway()
+if (process.env.RUNNER_URL) startGateway(app)
 if (store.config().qq.appId) {
   for (const { g } of store.db.prepare('SELECT DISTINCT g FROM messages').all()) qq.warmDirectory(g)
 }
@@ -130,7 +130,7 @@ const server = http.createServer(async (req, res) => {
             id: r.id,
             group: r.m.group,
             question: r.m.text,
-            state: r.state,
+            state: r.progress?.recovering && r.state === 'running' ? 'recovering' : r.state,
             ticket: r.ticket,
             answer: r.answer,
           })),
@@ -147,6 +147,7 @@ const server = http.createServer(async (req, res) => {
       if (!run) throw Error('找不到任务')
       return json({
         state: run.state,
+        progress: run.progress,
         executor: run.executor || 'legacy',
         route: run.route,
         ticket: run.ticket,
@@ -161,11 +162,46 @@ const server = http.createServer(async (req, res) => {
             sources: result.sources?.map(publicShareLink),
             detail: result.detail || result.data?.detail,
             ...(name === 'readWebPage'
-              ? { title: result.data?.title, charactersRead: result.data?.text?.length || 0 }
+              ? {
+                  title: result.data?.title,
+                  charactersRead: result.data?.text?.length || 0,
+                  imagesFound: result.data?.imageCount,
+                  videosFound: result.data?.videoCount,
+                  analyzed: result.data?.visuals?.map(({ type, position, coverage }) => ({
+                    type,
+                    position,
+                    coverage,
+                  })),
+                  mediaFailures: result.data?.visualFailures,
+                }
               : {}),
           })),
         answer: run.answer,
       })
+    }
+    if (path === '/api/resume') {
+      const prior = store.get('run', String(body.id)),
+        request = String(body.question || '').trim()
+      if (!prior?.ticket || prior.executor !== 'harness' || !request || prior.state !== 'failed')
+        throw Error('需要失败的 Harness Ticket 和续办指令')
+      const id = key(prior.id, 'resume', request)
+      if (!store.get('run', id))
+        store.put('run', id, {
+          id,
+          m: { ...prior.m, text: request },
+          ticket: prior.ticket,
+          state: 'queued',
+          executor: 'harness',
+          recovering: true,
+          route: {
+            action: 'continue',
+            thread: prior.m.thread,
+            session: prior.route?.session || prior.ticket,
+            goal: body.document ? 'document' : 'work',
+            requiresFile: !!body.document,
+          },
+        })
+      return json({ id, ticket: prior.ticket })
     }
     if (path === '/api/config') return json(save(body))
     if (path === '/api/test') {
@@ -194,12 +230,29 @@ const server = http.createServer(async (req, res) => {
           const resource = caps.save(group, body.file.mime, Buffer.from(body.file.data, 'base64'))
           m.parts.push({ type: 'media', mime: body.file.mime, resource, source: id })
         }
-        const result = await executeHarness(app, run, caps.reference(run.m))
+        if (body.routeAction) {
+          const { decideConversation } = await import('./conversation.mjs')
+          run.route = await decideConversation(app, run)
+          if (!['new', 'continue'].includes(run.route.action) || run.route.productTool)
+            throw Error('请求未进入行动工作区')
+        }
+        let result
+        for (;;) {
+          try {
+            result = await executeHarness(app, run, caps.reference(run.m))
+            break
+          } catch (e) {
+            if (!(e instanceof Pending)) throw e
+            await new Promise((ok) => setTimeout(ok, 1500))
+          }
+        }
         return json({
-          status: 'ok',
+          status: result.partial ? 'partial' : 'ok',
+          route: run.route,
           session: body.session || id,
           answer: result.text,
           artifact: result.artifact,
+          artifacts: result.artifacts,
           execution: store.get('step', key(run.id, 'harness'))?.result,
         })
       }

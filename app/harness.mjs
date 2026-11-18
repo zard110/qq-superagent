@@ -1,5 +1,5 @@
 import http from 'node:http'
-import https from 'node:https'
+import { instagramPost, isPostPhoto } from './photo-sources.mjs'
 import net from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -9,6 +9,7 @@ import { publicAddress, provider } from './network.mjs'
 import { publicShareText } from './articles.mjs'
 import { Pending } from './capabilities.mjs'
 const grants = new Map()
+const gatewayInstance = randomBytes(16).toString('hex')
 const runner = () => process.env.RUNNER_URL || 'http://runner:8090'
 const registries = new Set([
   'registry.npmjs.org',
@@ -26,7 +27,20 @@ async function body(req) {
   }
   return JSON.parse(Buffer.concat(chunks))
 }
-export function startGateway() {
+export function startGateway(runtime, port = 8790) {
+  // Rebind still queued/running requests before the scheduler starts polling.
+  for (const lease of runtime.store.all('workerLease')) {
+    const run = runtime.store.get('run', lease.run)
+    if (!run || !['running', 'queued'].includes(run.state)) {
+      runtime.store.del('workerLease', lease.run)
+      continue
+    }
+    try {
+      grant(runtime, run, lease)
+    } catch {
+      /* The scheduler records current configuration errors when it polls. */
+    }
+  }
   const server = http.createServer(async (req, res) => {
     try {
       const token = String(req.headers['x-api-key'] || req.headers.authorization || '').replace(
@@ -41,8 +55,10 @@ export function startGateway() {
       const data = await body(req)
       if (['/task/v1/messages', '/task/v1/chat/completions'].includes(req.url)) {
         const official = g.model.kind === 'deepseek'
-        if (++g.calls > 36 || req.url !== (official ? '/task/v1/messages' : '/task/v1/chat/completions'))
+        if (req.url !== (official ? '/task/v1/messages' : '/task/v1/chat/completions'))
           throw Error('模型调用超出当前任务范围')
+        g.lease.calls++
+        g.caps.store.put('workerLease', g.ctx.run, g.lease)
         const url =
           g.model.base.replace(/\/$/, '') + (official ? '/anthropic/v1/messages' : '/chat/completions')
         const headers = {
@@ -69,6 +85,32 @@ export function startGateway() {
       if (!Array.isArray(data.args) || data.args.some((a) => typeof a !== 'string'))
         throw Error('参数无效')
       let result
+      if (op === 'fetchImage') {
+        const [page, handle] = data.args
+        if (g.ctx.config.groups[g.ctx.m.group]?.disabled?.includes('downloadResource'))
+          throw Error('本群未启用素材下载')
+        const evidence = g.caps.store.get('workerPage', key(g.ctx.run, page))
+        if (g.sourceSite === 'instagram.com' && !instagramPost(page))
+          throw Error('需要 Instagram 原帖链接')
+        let file
+        if (evidence?.images?.includes(handle)) file = await g.caps.file(g.ctx.m.group, handle)
+        else if (
+          isPostPhoto(page, handle) &&
+          g.caps.store.get('workerSource', key(g.ctx.run, instagramPost(page)))
+        )
+          file = await g.caps.download(handle, 16 * 1024 * 1024)
+        else throw Error('图片须来自本轮读取页面的图片句柄或已检索到的同一原帖媒体地址')
+        if (!/^image\/(jpeg|png|webp)$/.test(file.mime) || file.bytes.length > 16 * 1024 * 1024)
+          throw Error('未取得支持的原图')
+        const resource = g.caps.save(g.ctx.m.group, file.mime, file.bytes)
+        const source = instagramPost(page) || page
+        g.caps.store.put('photoSource', key(g.ctx.run, resource), { resource, run: g.ctx.run, source })
+        res.setHeader('content-type', 'application/json')
+        res.end(
+          JSON.stringify({ resource, source, mime: file.mime, data: file.bytes.toString('base64') }),
+        )
+        return
+      }
       if (op === 'install-deb') {
         const r = await fetch(runner() + '/install-deb', {
           method: 'POST',
@@ -84,15 +126,46 @@ export function startGateway() {
           g.ctx,
         )
       } else throw Error('未知操作')
+      if (op === 'readWebPage') {
+        const page = data.args[0],
+          images = result.data?.images || []
+        g.caps.store.put('workerPage', key(g.ctx.run, page), { images })
+        const post = instagramPost(page)
+        if (post && result.status === 'read')
+          g.caps.store.put('workerSource', key(g.ctx.run, post), { run: g.ctx.run, post, read: true })
+        if (images.length && g.goal === 'photos')
+          result.data.photoDownloads = images.map((id) => ({
+            tool: 'qq-tool fetchImage',
+            args: [page, id],
+          }))
+      }
+      for (const url of result.sources || []) {
+        const post = instagramPost(url)
+        if (post && !g.caps.store.get('workerSource', key(g.ctx.run, post)))
+          g.caps.store.put('workerSource', key(g.ctx.run, post), { run: g.ctx.run, post })
+      }
       const id = key(g.ctx.run, op, JSON.stringify(data.args))
       g.caps.store.put('step', id, {
         id,
         run: g.ctx.run,
         name: op,
         result: {
-          status: 'ok',
+          status: result.status || 'ok',
           provider: op === 'install-deb' ? 'Debian' : result.provider,
           detail: op === 'install-deb' ? data.args.join(', ') : result.detail,
+          ...(op === 'readWebPage' && {
+            data: {
+              title: result.data?.title,
+              imageCount: result.data?.imageCount,
+              videoCount: result.data?.videoCount,
+              visuals: result.data?.visuals?.map(({ type, position, coverage }) => ({
+                type,
+                position,
+                coverage,
+              })),
+              visualFailures: result.data?.visualFailures,
+            },
+          }),
           sources: result.sources || [],
         },
       })
@@ -121,7 +194,7 @@ export function startGateway() {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
     }
   })
-  return server.listen(8790)
+  return server.listen(port)
 }
 const ext = {
   'audio/mpeg': 'mp3',
@@ -131,45 +204,42 @@ const ext = {
   'image/jpeg': 'jpg',
   'application/pdf': 'pdf',
 }
-// Node fetch limits the wait for response headers to five minutes. A group turn may take eight.
-function groupRequest(payload) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(runner().replace(/\/$/, '') + '/group')
-    const req = (url.protocol === 'https:' ? https : http).request(
-      url,
-      { method: 'POST', signal: AbortSignal.timeout(495000) },
-      (res) => {
-        let size = 0
-        const chunks = []
-        res.on('data', (chunk) => {
-          size += chunk.length
-          if (size > 36e6) res.destroy(Error('沙箱结果过大'))
-          else chunks.push(chunk)
-        })
-        res.on('error', reject)
-        res.on('end', () => {
-          try {
-            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks)) })
-          } catch (err) {
-            reject(err)
-          }
-        })
-      },
-    )
-    req.on('error', reject)
-    req.end(JSON.stringify(payload))
-  })
+function grant(runtime, run, lease) {
+  const config = runtime.store.config(),
+    model = provider(config, 'worker')
+  const g = {
+    group: key(run.m.group),
+    model,
+    lease,
+    caps: runtime.caps,
+    sourceSite: run.route?.sourceSite,
+    goal: run.route?.goal,
+    ctx: { m: run.m, config, worker: true, task: run.ticket, run: run.id },
+  }
+  grants.set(lease.token, g)
+  return g
 }
-export async function executeHarness(runtime, run, ref) {
+async function groupRequest(path, payload) {
+  let response
+  try {
+    response = await fetch(runner() + path, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000),
+    })
+  } catch {
+    throw new Pending('等待 Runner 连接恢复')
+  }
+  if (response.status === 429) throw new Pending('等待群工作区')
+  const out = await response.json()
+  if (response.status >= 500) throw new Pending('等待 Runner 恢复')
+  if (!response.ok) throw Error(out.error || 'Runner 请求失败')
+  return out
+}
+async function makeJob(runtime, run, ref, identity, model, recovering) {
   const { store, caps } = runtime,
     m = run.m,
     config = store.config()
-  if (
-    run.social ||
-    config.groups[m.group]?.code === false ||
-    config.groups[m.group]?.disabled?.includes('runCode')
-  )
-    throw Error('本群未开启通用任务执行')
   const ctx = { m, config, worker: true, task: run.ticket, run: run.id }
   const inputs = [],
     resources = new Set(ref.parts.filter((p) => p.type === 'media').map((p) => p.resource))
@@ -201,56 +271,97 @@ export async function executeHarness(runtime, run, ref) {
       data: file.bytes.toString('base64'),
     })
   }
-  const group = key(m.group),
-    model = provider(config, 'worker'),
-    token = randomBytes(32).toString('hex')
-  const session = key(m.group, run.route?.session || run.ticket)
-  grants.set(token, { group, model, caps, ctx, calls: 0 })
+  return {
+    ...identity,
+    recovering,
+    goal: run.route?.goal,
+    sourceSite: run.route?.sourceSite,
+    model: model.model,
+    official: model.kind === 'deepseek',
+    inputs,
+    question: publicShareText(m.text),
+    persona: config.groups[m.group]?.persona || config.persona,
+    sender: { name: m.nickname || store.member(m.group, m.author)?.name, role: m.role },
+    mentions: (m.mentions || []).map((u) => ({ name: u.name, bot: u.self || u.bot })),
+    references: ref.parts
+      .filter((p) => ['text', 'card'].includes(p.type))
+      .slice(0, 20)
+      .map((p) => ({
+        type: p.type,
+        title: p.title,
+        site: p.site,
+        url: p.url,
+        summary: p.summary,
+        text: p.text?.slice(0, 1000),
+      })),
+    requiresFile: run.route?.requiresFile,
+    history: history
+      .map((v) => [publicShareText(v.m.text)?.slice(0, 1200), publicShareText(v.answer)?.slice(0, 1500)])
+      .reverse(),
+  }
+}
+export async function executeHarness(runtime, run, ref) {
+  const { store, caps } = runtime,
+    m = run.m,
+    config = store.config()
+  if (
+    run.social ||
+    config.groups[m.group]?.code === false ||
+    config.groups[m.group]?.disabled?.includes('runCode')
+  )
+    throw Error('本群未开启通用任务执行')
+  const saved = store.get('harnessResult', run.id)
+  if (saved) return saved
+  const lease =
+    store.get('workerLease', run.id) ||
+    store.put('workerLease', run.id, { run: run.id, token: randomBytes(32).toString('hex'), calls: 0 })
+  const { model } = grant(runtime, run, lease)
+  const identity = {
+    gateway: gatewayInstance,
+    group: key(m.group),
+    ticket: key(m.group, run.route?.session || run.ticket),
+    run: run.id,
+    token: lease.token,
+  }
+  let terminal = false
   try {
-    const r = await groupRequest({
-      group,
-      ticket: session,
-      run: run.id,
-      token,
-      model: model.model,
-      official: model.kind === 'deepseek',
-      inputs,
-      question: publicShareText(m.text),
-      persona: config.groups[m.group]?.persona || config.persona,
-      sender: { name: m.nickname || store.member(m.group, m.author)?.name, role: m.role },
-      mentions: (m.mentions || []).map((u) => ({ name: u.name, bot: u.self || u.bot })),
-      references: ref.parts
-        .filter((p) => ['text', 'card'].includes(p.type))
-        .slice(0, 20)
-        .map((p) => ({
-          type: p.type,
-          title: p.title,
-          site: p.site,
-          url: p.url,
-          summary: p.summary,
-          text: p.text?.slice(0, 1000),
-        })),
-      requiresFile: run.route?.requiresFile,
-      history: history
-        .map((v) => [
-          publicShareText(v.m.text)?.slice(0, 1200),
-          publicShareText(v.answer)?.slice(0, 1500),
-        ])
-        .reverse(),
-    })
-    if (r.status === 429) throw new Pending('等待群工作区')
-    const out = r.body
-    if (r.status !== 200 || out.error) throw Error(out.error || 'Harness 执行失败')
+    let status = await groupRequest('/group/status', identity)
+    if (status.state === 'missing') {
+      const recovering = !!lease.submitted
+      status = await groupRequest(
+        '/group',
+        await makeJob(runtime, run, ref, identity, model, recovering),
+      )
+      lease.submitted = true
+      store.put('workerLease', run.id, lease)
+      if (recovering) run.recovering = true
+    }
+    if (status.state === 'running') {
+      run.progress = { ...status.progress, calls: lease.calls, recovering: !!run.recovering }
+      throw new Pending('后台执行中')
+    }
+    if (status.state !== 'finished') throw Error('Runner 返回了未知状态')
+    const out = status.result
+    if (out.interrupted && !lease.retried) {
+      lease.retried = true
+      store.put('workerLease', run.id, lease)
+      await groupRequest('/group/ack', identity)
+      throw new Pending('正在恢复已中断任务')
+    }
+    if (out.error || out.interrupted) throw Error(out.error || out.interrupted)
     let artifact
-    if (out.artifact)
+    if (out.artifact) {
       artifact = caps.save(m.group, out.artifact.mime, Buffer.from(out.artifact.data, 'base64'))
+      if (out.artifact.name)
+        store.put('resource', artifact, { ...store.get('resource', artifact), name: out.artifact.name })
+    }
     store.put('step', key(run.id, 'harness'), {
       run: run.id,
       name: 'Harness',
       result: {
         status: 'ok',
         provider: model.model,
-        detail: (out.steps || []).join(', '),
+        detail: lease.calls + ' 次模型调用 · ' + (out.steps || []).join(', '),
         sources: [out.session],
         data: { artifact },
       },
@@ -259,16 +370,48 @@ export async function executeHarness(runtime, run, ref) {
       /\[([^\]]+)\]\((?:sandbox:|file:|\/?work\/|\.?\/?outputs\/)[^)]+\)/gi,
       '$1',
     )
-    return { text, artifact }
+    let artifacts = artifact ? [artifact] : []
+    let partial = false,
+      answer = text
+    if (run.route?.goal === 'photos') {
+      const verified = (out.photos || [])
+        .map((id) => store.get('photoSource', key(run.id, id)))
+        .filter(Boolean)
+      artifacts = [...new Set(verified.map((v) => v.resource))].slice(0, 3)
+      partial = !artifacts.length
+      answer = partial ? '本次没有取得可核验、可发送的原图。' : text
+      const links = partial
+        ? store
+            .all('workerSource')
+            .filter((v) => v.run === run.id && v.read)
+            .map((v) => v.post)
+        : verified.map((v) => v.source)
+      const cited = new Set(
+        (answer.match(/https?:\/\/[^\s)）>]+/g) || []).map((v) => instagramPost(v) || v),
+      )
+      const extra = [...new Set(links)].filter((v) => !cited.has(v)).slice(0, 3)
+      if (extra.length) answer += '\n' + extra.join('\n')
+      artifact = artifacts[0]
+    }
+    const result = { text: answer, artifact, artifacts, partial }
+    store.put('harnessResult', run.id, result)
+    terminal = true
+    return result
   } catch (e) {
-    if (!(e instanceof Pending))
+    if (!(e instanceof Pending)) {
+      terminal = true
       store.put('step', key(run.id, 'harness-error'), {
         run: run.id,
         name: 'Harness',
         result: { status: 'failed', provider: model.model, sources: [], detail: e.message },
       })
+    }
     throw e
   } finally {
-    grants.delete(token)
+    if (terminal) {
+      grants.delete(lease.token)
+      store.del('workerLease', run.id)
+      void groupRequest('/group/ack', identity).catch(() => {})
+    }
   }
 }

@@ -3,6 +3,34 @@ import { remote } from './network.mjs'
 import { key, groupPolicy } from './messages.mjs'
 const api = 'https://api.bot.qq.com'
 const hash = (name, bytes) => createHash(name).update(bytes).digest('hex')
+export function documentParts(text) {
+  const sections = text
+    .replace(/\r\n/g, '\n')
+    .split(/(?=^#{1,4} |^第[零一二三四五六七八九十百\d]+[集场])/mu)
+  const chunks = []
+  let chunk = ''
+  for (const section of sections) {
+    if (chunk && chunk.length + section.length > 1400) {
+      chunks.push(chunk)
+      chunk = ''
+    }
+    for (const line of section.split(/(?<=\n)/u)) {
+      if (chunk && chunk.length + line.length > 1400) {
+        chunks.push(chunk)
+        chunk = ''
+      }
+      for (const char of line) {
+        if (chunk.length + char.length > 1400) {
+          chunks.push(chunk)
+          chunk = ''
+        }
+        chunk += char
+      }
+    }
+  }
+  if (chunk) chunks.push(chunk)
+  return chunks
+}
 export class QQ {
   constructor(runtime) {
     this.app = runtime
@@ -307,18 +335,22 @@ export class QQ {
   async upload(group, id) {
     const { bytes, mime } = await this.app.caps.file(group, id)
     const path = '/v2/groups/' + encodeURIComponent(group)
+    const document = ['text/plain', 'text/markdown'].includes(mime)
+    if (!document && !/^(audio|video|image)\//.test(mime)) throw Error('QQ 不支持该文件类型')
     const data = {
-      file_type: mime.startsWith('audio/') ? 3 : mime.startsWith('video/') ? 2 : 1,
-      file_name:
-        id +
-        ({
-          'audio/wav': '.wav',
-          'audio/mpeg': '.mp3',
-          'audio/flac': '.flac',
-          'video/mp4': '.mp4',
-          'image/jpeg': '.jpg',
-          'image/gif': '.gif',
-        }[mime] || '.png'),
+      file_type: document ? 4 : mime.startsWith('audio/') ? 3 : mime.startsWith('video/') ? 2 : 1,
+      file_name: document
+        ? this.store.get('resource', id)?.name || '文稿.' + (mime === 'text/markdown' ? 'md' : 'txt')
+        : id +
+          ({
+            'audio/wav': '.wav',
+            'audio/mpeg': '.mp3',
+            'audio/flac': '.flac',
+            'video/mp4': '.mp4',
+            'image/jpeg': '.jpg',
+            'image/gif': '.gif',
+            'image/webp': '.webp',
+          }[mime] || '.png'),
       srv_send_msg: false,
     }
     if (bytes.length < 5_000_000)
@@ -350,6 +382,38 @@ export class QQ {
     }
     return (await this.request(path + '/files', { ...data, upload_id: prep.upload_id })).file_info
   }
+  async splitDocument(o, e) {
+    const s = this.store
+    const file = s.get('resource', o.artifact)
+    if (!['text/plain', 'text/markdown'].includes(file?.mime) || ![400, 403, 415].includes(e.status))
+      return false
+    const text = (await this.app.caps.file(o.group, o.artifact)).bytes.toString('utf8')
+    const chunks = documentParts(text)
+    s.atomic(() => {
+      let previous
+      for (const [i, chunk] of chunks.entries()) {
+        const id = key(o.id, 'text', i)
+        if (!s.get('out', id))
+          s.put('out', id, {
+            id,
+            group: o.group,
+            origin: o.origin,
+            sourceOrigin: o.sourceOrigin,
+            text: '【' + (file.name || '剧本') + ' ' + (i + 1) + '/' + chunks.length + '】\n' + chunk,
+            status: 'pending',
+            at: Date.now(),
+            plain: true,
+            previous,
+            replyId: o.replyId,
+          })
+        previous = id
+      }
+      o.status = 'split'
+      o.detail = '文件上传受限，改为分段正文'
+      s.put('out', o.id, o)
+    })
+    return true
+  }
   async flush() {
     if (this.sending || !this.store.config().qq.appId) return
     this.sending = true
@@ -377,9 +441,20 @@ export class QQ {
           }
           s.put('out', o.id, o)
         }
+        let info
+        if (o.artifact) {
+          try {
+            info = await this.upload(o.group, o.artifact)
+          } catch (e) {
+            if (!(await this.splitDocument(o, e))) throw e
+            return
+          }
+        }
         const body = o.artifact
-          ? { msg_type: 7, media: { file_info: await this.upload(o.group, o.artifact) } }
-          : { msg_type: 2, markdown: { content: o.text } }
+          ? { msg_type: 7, media: { file_info: info } }
+          : o.plain
+            ? { msg_type: 0, content: o.text }
+            : { msg_type: 2, markdown: { content: o.text } }
         if (passive) Object.assign(body, { msg_id: origin.id, msg_seq: o.seq })
         if (!passive) {
           o.activeAttempt = true
@@ -388,8 +463,12 @@ export class QQ {
         const reply = await this.request('/v2/groups/' + encodeURIComponent(o.group) + '/messages', body)
         o.status = 'sent'
         o.remote = reply.id
+        s.put('out', o.id, o)
         if (reply.id && origin) {
-          const bot = s.lookup(o.group, key(key(o.group, o.sourceOrigin || o.origin), 'reply'))
+          const bot = s.lookup(
+            o.group,
+            o.replyId || key(key(o.group, o.sourceOrigin || o.origin), 'reply'),
+          )
           if (bot)
             s.message({
               ...bot,
@@ -398,6 +477,8 @@ export class QQ {
             })
         }
       } catch (e) {
+        if (o.status === 'sent') return
+        if (o.artifact && [400, 415].includes(e.status) && (await this.splitDocument(o, e))) return
         o.detail = e.message
         o.tries = (o.tries || 0) + 1
         o.after = Date.now() + Math.min(60, o.tries * 5) * 1000

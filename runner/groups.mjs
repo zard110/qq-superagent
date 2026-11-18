@@ -19,9 +19,7 @@ const env = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap((
   '-e',
   k + '=' + proxy,
 ])
-async function ensure(group) {
-  const name = prefix + group
-  const net = name + '-network'
+async function connectGateway(net) {
   const app = (
     await docker(
       'ps',
@@ -45,6 +43,12 @@ async function ensure(group) {
   }
   if (!Object.keys(JSON.parse(members) || {}).some((id) => id.startsWith(app)))
     await docker('network', 'connect', '--alias', 'app', net, app)
+}
+
+async function ensure(group) {
+  const name = prefix + group
+  const net = name + '-network'
+  await connectGateway(net)
   let state = await docker('inspect', '--format', '{{.State.Status}}', name)
     .then((v) => v.stdout.trim())
     .catch(() => 'missing')
@@ -110,7 +114,61 @@ async function ensure(group) {
   await docker('start', name)
   return name
 }
-export async function groupTurn(job) {
+export const stalled = (lastProgress, now = Date.now()) => now - lastProgress >= 8 * 60 * 1000
+const jobs = new Map()
+function identity(job) {
+  if (!valid(job.group) || !valid(job.ticket) || !valid(job.run) || !/^[a-f0-9]{64}$/.test(job.token))
+    throw Error('无效任务')
+  return [job.group, job.ticket, job.run].join('/')
+}
+export function groupStatus(job) {
+  const id = identity(job),
+    entry = jobs.get(id)
+  if (!entry) return { state: 'missing' }
+  if (entry.token !== job.token) throw Error('任务凭证无效')
+  return entry.result
+    ? { state: 'finished', result: entry.result }
+    : { state: 'running', progress: entry.progress }
+}
+export async function pollGroup(job) {
+  const status = groupStatus(job),
+    entry = jobs.get(identity(job))
+  if (status.state === 'running' && job.gateway && entry.gateway !== job.gateway) {
+    await locked(() => connectGateway(prefix + job.group + '-network'))
+    entry.gateway = job.gateway
+  }
+  return status
+}
+export function submitGroup(job) {
+  const status = groupStatus(job)
+  if (status.state !== 'missing') return status
+  if (active.has(job.group) || active.size >= 2)
+    throw Object.assign(Error('等待群工作区'), { status: 429 })
+  const id = identity(job),
+    entry = { token: job.token, gateway: job.gateway, progress: { at: Date.now(), step: '启动工作区' } }
+  jobs.set(id, entry)
+  void groupTurn(job, entry)
+    .then(
+      (result) => (entry.result = result),
+      (error) => (entry.result = { interrupted: error.message }),
+    )
+    .finally(() => {
+      const timer = setTimeout(
+        () => {
+          if (jobs.get(id) === entry) jobs.delete(id)
+        },
+        10 * 60 * 1000,
+      )
+      timer.unref()
+    })
+  return { state: 'running', progress: entry.progress }
+}
+export function acknowledgeGroup(job) {
+  const status = groupStatus(job)
+  if (status.state === 'finished') jobs.delete(identity(job))
+  return { state: status.state }
+}
+async function groupTurn(job, entry) {
   const { group, ticket, run, token } = job
   if (!valid(group) || !valid(ticket) || !valid(run) || !/^[a-f0-9]{64}$/.test(token))
     throw Error('无效任务')
@@ -131,14 +189,29 @@ export async function groupTurn(job) {
       if (size <= 36e6) chunks.push(b)
       else child.kill()
     })
-    child.stderr.resume()
+    let line = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      line += chunk
+      const lines = line.split('\n')
+      line = lines.pop().slice(-2000)
+      for (const value of lines) {
+        try {
+          const event = JSON.parse(value)
+          if (typeof event.step === 'string')
+            entry.progress = { at: Date.now(), step: event.step.slice(0, 120) }
+        } catch {}
+      }
+    })
     child.stdin.on('error', () => {})
     const done = new Promise((ok, fail) => {
       child.on('error', fail)
       child.on('close', (code) => (code === 0 ? ok() : fail(Error('Harness 任务进程退出'))))
     })
     child.stdin.end(JSON.stringify(job))
-    const timer = setTimeout(() => child.kill(), 8 * 60 * 1000)
+    const timer = setInterval(() => {
+      if (stalled(entry.progress.at)) child.kill()
+    }, 30000)
     try {
       await done
       return JSON.parse(Buffer.concat(chunks))
@@ -146,7 +219,7 @@ export async function groupTurn(job) {
       await docker('stop', '-t', '1', name)
       throw error
     } finally {
-      clearTimeout(timer)
+      clearInterval(timer)
     }
   } finally {
     active.delete(group)

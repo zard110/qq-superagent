@@ -134,7 +134,12 @@ function render() {
           const detail = await api('run', { id: state.runs[i].id })
           const pre = document.createElement('pre')
           pre.textContent = JSON.stringify(
-            { executor: detail.executor, conversation: detail.route, steps: detail.steps },
+            {
+              executor: detail.executor,
+              conversation: detail.route,
+              progress: detail.progress,
+              steps: detail.steps,
+            },
             null,
             2,
           )
@@ -226,7 +231,7 @@ function render() {
       recognizeText: '文字识别',
       synthesizeSpeech: '语音合成',
       searchWeb: '公开网页搜索',
-      readWebPage: '读取链接正文',
+      readWebPage: '读取网页正文、配图和视频',
       analyzeMedia: '图片与视频理解',
       generateImage: '生图与改图',
       resolveAudioSource: '获取公开音乐音源',

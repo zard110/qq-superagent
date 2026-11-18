@@ -56,7 +56,7 @@ export function sharedArticle(ref, question = '') {
 export function articleQuestion(question) {
   if (/查证|查一下是否|核[实查]|靠谱|生成|作图|提醒|对比|全网|翻译|查群|历史记录/.test(question))
     return false
-  return /看看|看一下|帮我看|看下|作者|谁写|谁发[布表]|哪[个家]?(?:网站|平台)|出处|来源|正文|总结|概括|讲了什么|写了什么|核心观点|主要内容/.test(
+  return /看看|看一下|帮我看|看下|作者|谁写|谁发[布表]|哪[个家]?(?:网站|平台)|出处|来源|正文|总结|概括|讲了什么|写了什么|核心观点|主要内容|(?:说|讲|写)(?:的|了)?(?:啥|什么)|什么意思|解读|配图|图里/.test(
     question,
   )
 }
@@ -112,7 +112,8 @@ export async function inspectArticle(card, call) {
     url = hit?.url
   }
   if (url) page = await call('readWebPage', { url })
-  if (!searched && (card.title || note) && page?.status !== 'read') await search()
+  if (!searched && (card.title || note) && page?.status !== 'read' && !page?.data?.visuals?.length)
+    await search()
   const live = page?.status === 'read' && page.data?.text
   const relatedAnswers = []
   if (!live && hit?.answers?.length) {
@@ -143,6 +144,11 @@ export async function inspectArticle(card, call) {
     url: publicShareLink(url),
     summary: card.summary,
     images: page?.data?.images || [],
+    visuals: page?.data?.visuals,
+    visualFailures: page?.data?.visualFailures,
+    visualScope: page?.data?.visualScope,
+    videoCount: page?.data?.videoCount,
+    imageCount: page?.data?.imageCount ?? page?.data?.images?.length ?? 0,
     preview: card.preview,
     linkFrom: card.url ? '卡片链接' : '同标题搜索结果',
     author,

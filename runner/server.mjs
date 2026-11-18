@@ -1,12 +1,15 @@
 import http from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { groupTurn, installDeb, recoverGroups } from './groups.mjs'
+import { submitGroup, pollGroup, acknowledgeGroup, installDeb, recoverGroups } from './groups.mjs'
 await recoverGroups()
 let active = 0
 http
   .createServer(async (req, res) => {
-    if (req.method !== 'POST' || !['/', '/group', '/install-deb'].includes(req.url)) {
+    if (
+      req.method !== 'POST' ||
+      !['/', '/group', '/group/status', '/group/ack', '/install-deb'].includes(req.url)
+    ) {
       res.writeHead(404).end()
       return
     }
@@ -27,7 +30,14 @@ http
       const input = Buffer.concat(chunks)
       const payload = JSON.parse(input)
       if (req.url !== '/') {
-        const result = req.url === '/group' ? await groupTurn(payload) : await installDeb(payload)
+        const result =
+          req.url === '/group'
+            ? submitGroup(payload)
+            : req.url === '/group/status'
+              ? await pollGroup(payload)
+              : req.url === '/group/ack'
+                ? acknowledgeGroup(payload)
+                : await installDeb(payload)
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(result))
         return

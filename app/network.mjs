@@ -32,7 +32,12 @@ export async function publicFile(input, limit = 2_000_000, redirects = 4, docume
     )
     req.on('error', fail)
   })
-  if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location && redirects) {
+  if (
+    response.statusCode >= 300 &&
+    response.statusCode < 400 &&
+    response.headers.location &&
+    redirects
+  ) {
     response.destroy()
     return publicFile(new URL(response.headers.location, url), limit, redirects - 1, document)
   }
@@ -62,14 +67,19 @@ export async function readPage(url) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(35000),
+      signal: AbortSignal.timeout(100000),
     })
     const data = await response.json()
     if (!response.ok) throw Error(data.detail || '移动浏览器访问失败')
     const page = parseDocument(data.html, data.url)
+    if (data.gallery) page.gallery = data.gallery
     if (data.status >= 400) {
       page.status = 'restricted'
       page.text = ''
+      page.images = []
+      page.videos = []
+      page.videoCount = 0
+      delete page.gallery
       page.detail = '移动浏览器收到原站 HTTP ' + data.status
     }
     return page
@@ -118,26 +128,74 @@ export function parseDocument(html, url) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 14000)
+  const scope = note
+    ? '#noteContainer, .note-detail, .note-slider, .swiper-container, article'
+    : 'article, [itemprop="articleBody"], main, [role="main"], .article-content, .post-content'
+  const inArticle = (el) =>
+    !$(el).closest('aside, nav, footer, header, [class*="recommend"], [class*="avatar"]').length &&
+    ($(el).closest(scope).length || (!$(scope).length && el.tagName === 'video'))
+  const mediaUrls = (values) => [
+    ...new Set(
+      values.flatMap((value) => {
+        if (!value) return []
+        try {
+          const link = new URL(value, url)
+          return /^https?:$/.test(link.protocol) && !link.username && !link.password ? [link.href] : []
+        } catch {
+          return []
+        }
+      }),
+    ),
+  ]
+  const meta = (selector) =>
+    $(selector)
+      .toArray()
+      .map((el) => $(el).attr('content'))
+  const inlineImages = $('img')
+    .toArray()
+    .filter(inArticle)
+    .map((el) => $(el).attr('data-browser-src') || $(el).attr('data-src') || $(el).attr('src'))
+  const declaredImages = mediaUrls(
+    meta('meta[property="og:image"], meta[property="og:image:secure_url"]'),
+  )
+  const images =
+    note && declaredImages.length ? declaredImages : mediaUrls([...inlineImages, ...declaredImages])
+  const players = $('video').toArray().filter(inArticle)
+  const videoGroups = players.map((el) =>
+    mediaUrls([
+      $(el).attr('data-browser-src'),
+      $(el).attr('src'),
+      ...$(el)
+        .find('source')
+        .toArray()
+        .map((source) => $(source).attr('src')),
+    ]),
+  )
+  const declaredVideo = mediaUrls(
+    meta(
+      'meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"]',
+    ),
+  )
+  const videos = mediaUrls([
+    ...videoGroups.map(
+      (links) => links.find((link) => /\.(mp4|webm|mov)(?:[?#]|$)/i.test(link)) || links[0],
+    ),
+    ...(players.length && videoGroups.some((links) => links.length) ? [] : declaredVideo),
+  ])
   const login =
-    /\/(?:login|signin)(?:\/|$)/i.test(new URL(url).pathname) || /^(?:log\s*in|sign\s*in|登录)/i.test(title)
+    /\/(?:login|signin)(?:\/|$)/i.test(new URL(url).pathname) ||
+    /^(?:log\s*in|sign\s*in|登录)/i.test(title)
   const restricted =
     login ||
-    (!text && !description) ||
+    (!text && !description && !players.length && !images.length && !videos.length) ||
     /^(安全验证|登录|sign in|just a moment)|安全中心|异常请求|访问受限/i.test(title) ||
     /请.{0,4}登录后.{0,4}(查看|阅读)|访问异常|验证后继续/.test(text.slice(0, 500))
   return {
     title,
     url,
-    images: restricted
-      ? []
-      : [
-          ...new Set(
-            $('meta[property="og:image"]')
-              .toArray()
-              .map((el) => $(el).attr('content'))
-              .filter((v) => /^https?:\/\//i.test(v)),
-          ),
-        ].slice(0, 30),
+    images: restricted ? [] : images.slice(0, 30),
+    videos: restricted ? [] : videos.slice(0, 10),
+    videoCount: restricted ? 0 : Math.max(players.length, videos.length),
     author: restricted ? undefined : author,
     text: restricted ? '' : text || description,
     status: restricted ? 'restricted' : text ? 'read' : 'metadata',
@@ -185,7 +243,9 @@ export async function publicAddress(host) {
     const dns = await remote('https://dns.google/resolve?type=A&name=' + encodeURIComponent(host), {
       signal: AbortSignal.timeout(6500),
     })
-    ips = (dns.Answer || []).filter((row) => row.type === 1).map((row) => ({ address: row.data, family: 4 }))
+    ips = (dns.Answer || [])
+      .filter((row) => row.type === 1)
+      .map((row) => ({ address: row.data, family: 4 }))
   }
   if (!ips.length || ips.some((ip) => ipaddr.process(ip.address).range() !== 'unicast'))
     throw Error('地址不属于公开网络')
