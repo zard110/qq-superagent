@@ -1,4 +1,5 @@
 import http from 'node:http'
+import https from 'node:https'
 import net from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -133,8 +134,9 @@ const ext = {
 // Node fetch limits the wait for response headers to five minutes. A group turn may take eight.
 function groupRequest(payload) {
   return new Promise((resolve, reject) => {
-    const req = http.request(
-      new URL('/group', runner()),
+    const url = new URL(runner().replace(/\/$/, '') + '/group')
+    const req = (url.protocol === 'https:' ? https : http).request(
+      url,
       { method: 'POST', signal: AbortSignal.timeout(495000) },
       (res) => {
         let size = 0

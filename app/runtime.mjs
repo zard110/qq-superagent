@@ -167,7 +167,15 @@ export class Runtime {
           })
         if (held.length) return m
       }
-      if (act) {
+      const waitingOnly =
+        !act &&
+        process.env.QQ_EXECUTOR === 'harness' &&
+        waiting &&
+        Date.parse(m.at) <= waiting.until &&
+        !m.refs.length &&
+        !m.mentions.length &&
+        !!m.text.trim()
+      if (act || waitingOnly) {
         if (expected || m.refs.includes(waiting?.source)) this.store.del('awaitReply', pendingKey)
         const social = !m.mention && groupPolicy(config, m.group).mode === 'social' && !m.refs.length
         if (social) this.store.put('lastSpeech', m.group, Date.now())
@@ -175,7 +183,8 @@ export class Runtime {
           id: key(m.group, m.id),
           m,
           state: 'queued',
-          social,
+          social: !!social && !waitingOnly,
+          waitingSource: waitingOnly ? waiting.source : undefined,
           executor: process.env.QQ_EXECUTOR === 'harness' ? 'harness' : 'legacy',
         })
       }
@@ -297,6 +306,19 @@ export class Runtime {
       let useHarness = run.executor === 'harness'
       if (useHarness && !run.route) {
         run.route = await decideConversation(this, run)
+        if (run.waitingSource) {
+          const owner = key(m.group, m.author)
+          const waiting = s.get('awaitReply', owner)
+          if (
+            waiting?.source !== run.waitingSource ||
+            !run.route.answersWaiting ||
+            run.route.thread !== s.lookup(m.group, run.waitingSource)?.thread
+          ) {
+            s.put('run', id, { ...run, state: 'ignored' })
+            return
+          }
+          s.del('awaitReply', owner)
+        }
         if (run.route.productTool) {
           run.executor = 'capability'
           useHarness = false
@@ -753,7 +775,7 @@ export class Runtime {
         author: '@bot',
         nickname: '机器人',
         mentions: [],
-        refs: [],
+        refs: run.route?.action === 'clarify' ? [m.id] : [],
         text,
         parts,
       })

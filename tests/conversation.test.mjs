@@ -45,6 +45,11 @@ test('引用旧作品时保留版本，独立请求分叉，候选按群隔离',
   assert.equal(follow.session, 'ticket1')
   action = 'chat'
   assert.equal((await decideConversation(runtime, next)).thread, 'thread1')
+  s.del('run', 'old')
+  action = 'continue'
+  const firstTask = await decideConversation(runtime, next)
+  assert.equal(firstTask.action, 'new')
+  assert.equal(firstTask.source, 'reply')
 })
 test('等待答复按发言人保存，其他人的插话不会取走等待记录', (t) => {
   const s = new Store(':memory:')
