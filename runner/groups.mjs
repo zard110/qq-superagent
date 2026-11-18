@@ -54,7 +54,10 @@ async function ensure(group) {
       await docker('image', 'inspect', '--format', '{{.Id}}', 'qq-superagent-harness:local')
     ).stdout.trim()
     const nets = (await docker('inspect', '--format', '{{json .NetworkSettings.Networks}}', name)).stdout
-    if (current !== desired || !Object.hasOwn(JSON.parse(nets), net)) {
+    const layout = (
+      await docker('inspect', '--format', '{{index .Config.Labels "qq.group.layout"}}', name)
+    ).stdout.trim()
+    if (current !== desired || layout !== '2' || !Object.hasOwn(JSON.parse(nets), net)) {
       await docker('rm', '-f', name)
       state = 'missing'
     }
@@ -82,13 +85,15 @@ async function ensure(group) {
       label,
       '--label',
       'qq.group=' + group,
+      '--label',
+      'qq.group.layout=2',
       '--network',
       net,
       '--pull=never',
       '--init',
       '--read-only',
       '--tmpfs',
-      '/tmp:rw,nosuid,nodev,size=256m',
+      '/tmp:rw,exec,nosuid,nodev,size=256m',
       '--cap-drop=ALL',
       '--security-opt=no-new-privileges',
       '--memory=1536m',
