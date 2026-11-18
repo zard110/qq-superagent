@@ -18,6 +18,11 @@ class VideoTest(unittest.TestCase):
             self.assertGreaterEqual(len(output["frames"]), 2)
             self.assertTrue(all(base64.b64decode(frame["data"]).startswith(b"\xff\xd8") for frame in output["frames"]))
             self.assertGreater(len(base64.b64decode(output["audio"])), 1000)
+            request = json.loads(payload)
+            request["audioFormat"] = "opus"
+            opus = json.loads(subprocess.check_output([sys.executable, str(worker)], input=json.dumps(request).encode()))
+            self.assertEqual(opus["audioChunks"][0]["at"], 0)
+            self.assertTrue(base64.b64decode(opus["audioChunks"][0]["data"]).startswith(b"OggS"))
 
 if __name__ == "__main__":
     unittest.main()

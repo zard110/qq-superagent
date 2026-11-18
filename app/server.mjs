@@ -8,6 +8,7 @@ import { Capabilities } from './capabilities.mjs'
 import { Runtime } from './runtime.mjs'
 import { QQ } from './qq.mjs'
 import { key } from './messages.mjs'
+import { settings, selectedProvider } from './providers.mjs'
 
 const dir = resolve(process.env.STATE_DIR || 'state')
 mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -22,6 +23,9 @@ const store = new Store(join(dir, 'bot.sqlite')),
 qq.enabled = true
 function publicConfig() {
   const c = store.config()
+  const profile = settings(c)
+  c.routes = profile.routes
+  c.vendors = { deepseek: { key: profile.vendors.deepseek.key ? '••••' : '' } }
   if (c.qq.secret) c.qq.secret = '••••'
   for (const p of Object.values(c.providers)) if (p.key) p.key = '••••'
   return c
@@ -40,6 +44,17 @@ function save(c) {
   if (!c.qq || !c.groups || !c.providers || typeof c.persona !== 'string' || !c.persona.trim())
     throw Error('配置格式不正确')
   const old = store.config()
+  const previous = settings(old)
+  c.vendors ??= previous.vendors
+  if (typeof c.vendors.deepseek?.key !== 'string') throw Error('供应商配置格式不正确')
+  if (c.vendors.deepseek.key === '••••') c.vendors.deepseek.key = previous.vendors.deepseek.key
+  c.routes ??= previous.routes
+  const vision = selectedProvider(c, 'vision')
+  if (c.routes.vision === 'follow' && vision?.kind === 'deepseek' && vision.model !== 'deepseek-flash')
+    throw Error('主模型不支持图像输入，请将「图像理解」设为 Flash')
+  for (const [role, item] of Object.entries(settings(c).catalog)) {
+    if (!item.options.some(([id]) => id === c.routes[role])) throw Error('无效的能力配置：' + item.label)
+  }
   if (c.qq.secret === '••••') c.qq.secret = old.qq.secret
   for (const [k, p] of Object.entries(c.providers)) {
     if (p.key === '••••') p.key = old.providers[k]?.key
@@ -75,7 +90,7 @@ const server = http.createServer(async (req, res) => {
     if (Object.hasOwn(files, path)) {
       res.setHeader(
         'content-security-policy',
-        "default-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'",
+        "default-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
       )
       res.setHeader(
         'content-type',
@@ -94,6 +109,7 @@ const server = http.createServer(async (req, res) => {
     if (path === '/api/state' && req.method === 'GET')
       return json({
         config: publicConfig(),
+        providerCatalog: settings(store.config()).catalog,
         persona,
         qq: qq.status,
         skills: caps.tools().map((v) => v.function.name),
@@ -155,14 +171,28 @@ const server = http.createServer(async (req, res) => {
         }
       const args = { ...body.args }
       if (body.file) {
-        if (!/^(image|video)\//.test(body.file.mime)) throw Error('请选择图片或视频')
+        if (
+          !/^(image|video)\//.test(body.file.mime) &&
+          !(body.name === 'recognizeText' && body.file.mime === 'application/pdf')
+        )
+          throw Error('不支持的测试文件类型')
         args.resource = caps.save(group, body.file.mime, Buffer.from(body.file.data, 'base64'))
       }
-      if (!['analyzeMedia', 'readWebPage', 'searchWeb', 'chat'].includes(body.name))
+      if (
+        ![
+          'analyzeMedia',
+          'readWebPage',
+          'searchWeb',
+          'recognizeText',
+          'synthesizeSpeech',
+          'chat',
+          'worker',
+        ].includes(body.name)
+      )
         throw Error('请选择测试能力')
-      if (body.name === 'chat') {
+      if (body.name === 'chat' || body.name === 'worker') {
         const { chat, provider } = await import('./network.mjs')
-        const p = provider(store.config(), 'chat')
+        const p = provider(store.config(), body.name)
         return json({
           status: 'ok',
           provider: p.model,
@@ -170,13 +200,16 @@ const server = http.createServer(async (req, res) => {
         })
       }
       try {
-        return json(await caps.run(body.name, args, { config: store.config(), m }))
+        const result = await caps.run(body.name, args, { config: store.config(), m, adminTest: true })
+        if (body.name === 'synthesizeSpeech' && result.data?.artifact)
+          result.audio = (await caps.file(group, result.data.artifact)).bytes.toString('base64')
+        return json(result)
       } catch (e) {
         const adapter = caps.registry.get(body.name)
         return json({
           status: 'failed',
           capability: body.name,
-          provider: store.config().providers[adapter.provider]?.model || adapter.provider,
+          provider: selectedProvider(store.config(), adapter.provider)?.base || adapter.provider,
           detail: e.message,
         })
       }

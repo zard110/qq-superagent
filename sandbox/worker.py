@@ -9,7 +9,7 @@ import tempfile
 def command(*args):
     return subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=45)
 
-def video(data):
+def video(data, audio_format='mp3'):
     with tempfile.TemporaryDirectory() as folder:
         path = os.path.join(folder, "clip")
         with open(path, "wb") as output:
@@ -27,6 +27,13 @@ def video(data):
                 frames.append({"at": at, "data": base64.b64encode(frame).decode()})
         audio = None
         if any(s["codec_type"] == "audio" for s in probe["streams"]):
+            if audio_format == "opus":
+                chunks = []
+                for start in range(0, math.ceil(duration), 30):
+                    raw = command("ffmpeg", "-v", "error", "-ss", str(start), "-i", path, "-t", "30", "-vn", "-ac", "1", "-c:a", "libopus", "-b:a", "24k", "-f", "ogg", "-")
+                    if raw:
+                        chunks.append({"at": start, "data": base64.b64encode(raw).decode()})
+                return {"duration": duration, "frames": frames, "audioChunks": chunks}
             raw = command("ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", "-f", "mp3", "-")
             audio = base64.b64encode(raw).decode()
         return {"duration": duration, "frames": frames, "audio": audio}
@@ -39,7 +46,7 @@ def main():
             out.seek(0)
             return {"exit": process.returncode, "output": out.read(16000).decode(errors="replace")}
     if body["op"] == "video":
-        return video(body["data"])
+        return video(body["data"], body.get("audioFormat", "mp3"))
     raise ValueError("未知操作")
 
 if __name__ == "__main__":

@@ -92,12 +92,7 @@ export async function remote(url, options = {}) {
   }
   return r.json()
 }
-export function provider(config, role) {
-  const p = config.providers[role] || (['vision', 'worker'].includes(role) ? config.providers.chat : null)
-  if (!p?.base || (!p.model && ['chat', 'worker', 'vision', 'speech'].includes(role)))
-    throw Error('请在面板配置 ' + role + ' 供应商与模型')
-  return p
-}
+export { requireProvider as provider } from './providers.mjs'
 export const auth = (p) => (p.key ? { Authorization: 'Bearer ' + p.key } : {})
 export async function chat(p, messages, tools) {
   const data = await remote(p.base.replace(/\/$/, '') + '/chat/completions', {

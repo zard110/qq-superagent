@@ -105,8 +105,8 @@ export class QQ {
     const { bytes, mime } = await this.app.caps.file(group, id)
     const path = '/v2/groups/' + encodeURIComponent(group)
     const data = {
-      file_type: 1,
-      file_name: id + (mime === 'image/jpeg' ? '.jpg' : '.png'),
+      file_type: mime === 'audio/wav' ? 3 : 1,
+      file_name: id + (mime === 'audio/wav' ? '.wav' : mime === 'image/jpeg' ? '.jpg' : '.png'),
       srv_send_msg: false,
     }
     if (bytes.length < 5_000_000)

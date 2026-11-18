@@ -3,8 +3,15 @@ import { provider, auth, remote, readPage, publicFile, chat } from './network.mj
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { settings, selectedProvider } from './providers.mjs'
+import * as deepseek from './deepseek.mjs'
 const str = { type: 'string' }
 const definitions = {
+  recognizeText: ['提取图片或 PDF 中的原文，按页返回', { resource: str }],
+  synthesizeSpeech: [
+    '仅在群友明确要求朗读或发送语音时合成语音',
+    { text: str, voice: { type: 'string', enum: ['stella', 'tide'] } },
+  ],
   resolveReference: ['读取当前消息引用的文本、卡片与媒体句柄', {}],
   searchHistory: [
     '检索本群留存的原始消息。按关键词、成员 ID、起止 ISO 时间筛选',
@@ -34,6 +41,8 @@ export const toolSpecs = Object.entries(definitions).map(([name, [description, p
       additionalProperties: false,
       required:
         {
+          recognizeText: ['resource'],
+          synthesizeSpeech: ['text'],
           analyzeMedia: ['resource', 'question'],
           readWebPage: ['url'],
           searchWeb: ['query'],
@@ -46,7 +55,9 @@ export const toolSpecs = Object.entries(definitions).map(([name, [description, p
 }))
 const expected = {
   analyzeMedia: 'vision',
-  readWebPage: 'HTTP',
+  readWebPage: 'fetch',
+  recognizeText: 'ocr',
+  synthesizeSpeech: 'tts',
   searchWeb: 'search',
   generateImage: 'image',
   runCode: 'Docker',
@@ -73,6 +84,8 @@ export class Capabilities {
           searchWeb: '候选来源列表',
           analyzeMedia: '发现与读取范围',
           generateImage: '群内产物句柄',
+          recognizeText: '逐页原文',
+          synthesizeSpeech: '群内语音产物',
           scheduleReminder: '触发计划',
           runCode: '退出状态与标准输出',
         }[name],
@@ -84,8 +97,9 @@ export class Capabilities {
   register(adapter) {
     this.registry.set(adapter.spec.function.name, adapter)
   }
-  tools() {
-    return [...this.registry.values()].map((a) => a.spec)
+  tools(config) {
+    const routes = config ? settings(config).routes : {}
+    return [...this.registry.values()].filter((a) => routes[a.provider] !== 'off').map((a) => a.spec)
   }
   async run(name, args, ctx) {
     const adapter = this.registry.get(name)
@@ -128,9 +142,11 @@ export class Capabilities {
   async builtin(name, a, ctx) {
     const { m, config } = ctx
     const backend = this.registry.get(name).provider
-    const backendConfig =
-      config.providers[backend] || (backend === 'vision' ? config.providers.chat : undefined)
-    const label = backendConfig?.model || backendConfig?.base || backend
+    const backendConfig = selectedProvider(config, backend)
+    const label =
+      backendConfig?.kind === 'deepseek'
+        ? 'DeepSeek · ' + (backendConfig.model || backend)
+        : backendConfig?.model || backendConfig?.base || backend
     const result = (data, sources = [], status = 'ok') => ({
       capability: name,
       provider: label,
@@ -165,9 +181,20 @@ export class Capabilities {
         rows.map((v) => v.id),
       )
     }
+    if (name === 'recognizeText') {
+      const pages = await deepseek.recognize(provider(config, 'ocr'), await this.file(m.group, a.resource))
+      return result(pages, [m.id, a.resource])
+    }
+    if (name === 'synthesizeSpeech') {
+      if (!ctx.adminTest && (ctx.social || !/朗读|语音|念给|读给|读出来|配音/.test(m.text)))
+        throw Error('请明确要求朗读或发送语音')
+      const audio = await deepseek.synthesize(provider(config, 'tts'), a.text, a.voice)
+      return result({ artifact: this.save(m.group, 'audio/wav', audio) }, [m.id])
+    }
     if (name === 'readWebPage') {
       try {
-        const page = await readPage(a.url)
+        const p = provider(config, 'fetch')
+        const page = p.kind === 'deepseek' ? await deepseek.read(p, a.url) : await readPage(a.url)
         if (page.status === 'restricted')
           page.card = this.reference(m).parts.find((p) => p.type === 'card' && p.url === a.url)
         return result(page, [a.url], page.status)
@@ -187,6 +214,13 @@ export class Capabilities {
       const q = String(a.query || '').slice(0, 350)
       if (!q || /https?:\/\/|(?:rkey|auth_token)=|[A-Fa-f0-9]{32}/.test(q))
         throw Error('搜索词请只使用公开关键词')
+      if (p.kind === 'deepseek') {
+        const hits = await deepseek.search(p, q, a.domain, a.timeRange)
+        return result(
+          hits,
+          hits.map((h) => h.url),
+        )
+      }
       const response = await remote(p.base, {
         method: 'POST',
         headers: { ...auth(p), 'content-type': 'application/json' },
@@ -225,18 +259,31 @@ export class Capabilities {
     let content = [{ type: 'text', text: question + '。请给出可核查的画面或原话，不能确定时说明。' }]
     let detail = '图片'
     if (file.mime.startsWith('video/')) {
-      const sample = await this.sandbox({ op: 'video', data: file.bytes.toString('base64') })
+      const speech = selectedProvider(config, 'speech')
+      const useOfficialSpeech = speech?.kind === 'deepseek' && !!speech.key
+      const sample = await this.sandbox({
+        op: 'video',
+        audioFormat: useOfficialSpeech ? 'opus' : 'mp3',
+        data: file.bytes.toString('base64'),
+      })
+      if (sample.audioChunks?.length) {
+        const segments = await deepseek.transcribe(speech, sample.audioChunks)
+        content.push({
+          type: 'text',
+          text: '分段转写 [起始秒,结束秒,文本]。时间为片段范围：' + JSON.stringify(segments).slice(0, 24000),
+        })
+      }
       detail = '视频抽样，时长 ' + sample.duration + ' 秒'
       for (const f of sample.frames)
         content.push(
           { type: 'text', text: f.at + ' 秒' },
           { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + f.data } },
         )
-      if (sample.audio && !config.providers.speech) {
+      if (sample.audio && (!speech || (speech.kind === 'deepseek' && !speech.key))) {
         detail += '；未配置音轨转写，仅有画面证据'
         content.push({ type: 'text', text: detail })
       }
-      if (sample.audio && config.providers.speech) {
+      if (sample.audio && speech && speech.kind !== 'deepseek') {
         const speech = provider(config, 'speech'),
           form = new FormData()
         form.set('model', speech.model)

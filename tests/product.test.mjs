@@ -124,6 +124,9 @@ test('挂起的生成工具跨重启恢复同一请求，产物进入媒体出�
   const f = fixture(t, async (p, d) =>
     d.at(-1).role === 'tool' ? say('已完成横版') : call('generateImage', { prompt: '横版' }, 'img1'),
   )
+  const config = f.s.config()
+  config.providers.image = { base: 'https://fixture.test', model: 'create' }
+  f.s.put('config', 'main', config)
   let starts = 0,
     polls = 0
   const remoteState = new Map()

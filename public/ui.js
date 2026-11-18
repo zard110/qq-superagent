@@ -92,7 +92,7 @@ function render() {
   $('#title').textContent = tab
   const nav = $('#nav')
   nav.replaceChildren()
-  for (const t of ['运行', '接入与模型', '群与人格', '能力测试', '定时提醒']) {
+  for (const t of ['运行', '模型供应商', '接入与模型', '群与人格', '能力测试', '定时提醒']) {
     const b = document.createElement('button')
     b.textContent = t
     b.setAttribute('aria-current', String(tab === t))
@@ -138,14 +138,27 @@ function render() {
     })
     on('reload', refresh)
   }
+  if (tab === '模型供应商') {
+    const vendor = c.vendors.deepseek
+    view.innerHTML = card(
+      'DeepSeek 官方',
+      '<p><small>api.deepseek.com · ' +
+        (vendor.key ? '已保存密钥' : '尚未配置密钥') +
+        '</small></p>' +
+        field('deepseekKey', 'API Key', vendor.key, 'password') +
+        '<p>主模型、子 Agent 和已启用的官方能力共用此密钥。</p>' +
+        '<p><a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">管理官方 API Key</a> · <a href="https://api-docs.deepseek.com/zh-cn/news/news261113/" target="_blank" rel="noreferrer">官方能力说明</a></p>' +
+        btn('vendorSave', '保存供应商'),
+    )
+    on('vendorSave', async () => {
+      vendor.key = val('deepseekKey').trim()
+      await save()
+    })
+  }
   if (tab === '接入与模型') {
-    const roles = {
-      chat: ['主模型', 'https://api.deepseek.com', 'deepseek-chat'],
-      worker: ['子 Agent', '', ''],
-      vision: ['视觉模型', '', ''],
-      speech: ['语音转写', '', ''],
-      search: ['搜索 · Tavily', 'https://api.tavily.com/search', ''],
-      image: ['生图 · fal 队列', 'https://queue.fal.run', 'fal-ai/nano-banana'],
+    const pick = (role) => {
+      const item = state.providerCatalog[role]
+      return select('role-' + role, item.label, item.options, c.routes[role])
     }
     view.innerHTML =
       card(
@@ -155,38 +168,27 @@ function render() {
           field('secret', 'Client Secret', c.qq.secret, 'password') +
           '</div>',
       ) +
-      Object.entries(roles)
-        .map(([k, [l, base, model]]) => {
-          const p = c.providers[k] || {}
-          return card(
-            l,
-            field(k + 'Base', '接口地址', p.base ?? base) +
-              '<div class="grid">' +
-              (k === 'search' ? '' : field(k + 'Model', '模型', p.model ?? model)) +
-              field(k + 'Key', 'API Key', p.key, 'password') +
-              '</div>' +
-              (k === 'image'
-                ? field(k + 'Edit', '参考图编辑模型', p.editModel ?? 'fal-ai/nano-banana/edit')
-                : ''),
-          )
-        })
-        .join('') +
-      btn('save', '保存连接')
+      card(
+        '对话与视觉',
+        '<div class="grid">' +
+          ['chat', 'worker', 'vision'].map(pick).join('') +
+          '</div>' +
+          btn('openVendors', '配置模型供应商'),
+      ) +
+      card(
+        '工具与媒体',
+        '<div class="grid">' +
+          ['search', 'fetch', 'speech', 'ocr', 'tts', 'image'].map(pick).join('') +
+          '</div>',
+      ) +
+      btn('save', '保存配置')
+    on('openVendors', () => {
+      tab = '模型供应商'
+      render()
+    })
     on('save', async () => {
       c.qq = { appId: val('appId'), secret: val('secret') }
-      for (const k of Object.keys(roles)) {
-        const base = val(k + 'Base').trim()
-        if (!base) {
-          delete c.providers[k]
-          continue
-        }
-        c.providers[k] = {
-          base,
-          key: val(k + 'Key'),
-          model: $('#' + k + 'Model')?.value,
-          ...(k === 'image' ? { editModel: val(k + 'Edit') } : {}),
-        }
-      }
+      for (const role of Object.keys(state.providerCatalog)) c.routes[role] = val('role-' + role)
       await save()
     })
   }
@@ -212,6 +214,8 @@ function render() {
       await save()
     })
     const switches = {
+      recognizeText: '文字识别',
+      synthesizeSpeech: '语音合成',
       searchWeb: '公开网页搜索',
       readWebPage: '读取链接正文',
       analyzeMedia: '图片与视频理解',
@@ -279,13 +283,16 @@ function render() {
     view.innerHTML = card(
       '试跑能力',
       select('skill', '能力', [
-        ['chat', '对话模型'],
+        ['chat', '主模型'],
+        ['worker', '子 Agent'],
+        ['recognizeText', '文字识别（图片或 PDF）'],
+        ['synthesizeSpeech', '语音合成'],
         ['readWebPage', '读取网页'],
         ['searchWeb', '搜索公开网页'],
         ['analyzeMedia', '图片或视频理解'],
       ]) +
         field('query', '问题、搜索词或网页 URL') +
-        '<label>图片或视频<input id="media" type="file" accept="image/*,video/*"></label>' +
+        '<label>素材<input id="media" type="file" accept="image/*,video/*,application/pdf"></label>' +
         btn('test', '开始测试') +
         '<pre id="output"></pre>',
     )
@@ -298,7 +305,7 @@ function render() {
           q = val('query'),
           name = val('skill')
         let file
-        if (f && name === 'analyzeMedia') {
+        if (f && ['analyzeMedia', 'recognizeText'].includes(name)) {
           if (f.size > 32 * 1024 * 1024) throw Error('素材超过 32 MiB')
           file = {
             mime: f.type,
@@ -310,11 +317,21 @@ function render() {
             }),
           }
         }
-        $('#output').textContent = JSON.stringify(
-          await api('test', { name, question: q, args: { question: q, url: q, query: q }, file }),
-          null,
-          2,
-        )
+        const result = await api('test', {
+          name,
+          question: q,
+          args: { question: q, text: q, url: q, query: q },
+          file,
+        })
+        const wav = result.audio
+        delete result.audio
+        $('#output').textContent = JSON.stringify(result, null, 2)
+        if (wav) {
+          const player = document.createElement('audio')
+          player.controls = true
+          player.src = 'data:audio/wav;base64,' + wav
+          $('#output').append(player)
+        }
       } catch (e) {
         $('#output').textContent = e.message
       } finally {

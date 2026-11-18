@@ -207,7 +207,7 @@ export class Runtime {
       const p = provider(config, worker ? 'worker' : 'chat')
       let artifact = run.artifact
       const specs = this.caps
-        .tools()
+        .tools(config)
         .filter((t) => !config.groups[m.group]?.disabled?.includes(t.function.name))
         .filter((t) => worker || !['generateImage', 'runCode'].includes(t.function.name))
       if (!worker) specs.push(delegate)
@@ -245,8 +245,8 @@ export class Runtime {
             !called('analyzeMedia')
           )
             missing.push('analyzeMedia')
-          const unavailable = missing.filter((name) =>
-            config.groups[m.group]?.disabled?.includes(name.split('（')[0]),
+          const unavailable = missing.filter(
+            (name) => !specs.some((tool) => tool.function.name === name.split('（')[0]),
           )
           if (unavailable.length) {
             this.finish(run, '本群已关闭此次回答需要的能力：' + unavailable.join('、'), artifact)
