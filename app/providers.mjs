@@ -16,9 +16,9 @@ const roles = {
 const labels = {
   follow: '跟随主模型',
   official: 'DeepSeek 官方',
-  local: '本机读取公开网页',
+  local: '仅移动浏览器读取（Docker）',
   off: '关闭',
-  auto: 'DeepSeek 官方（未设密钥时本机读取）',
+  auto: '移动浏览器优先，DeepSeek 备用',
   [flash]: 'DeepSeek 官方 · Flash',
   [pro]: 'DeepSeek 官方 · V4 Pro',
   legacy: '沿用已保存的供应商',
@@ -54,7 +54,13 @@ export function settings(c) {
     if (role === 'vision' && !old && prior.chat?.base && !official(prior.chat)) selected = 'follow'
     routes[role] = c.routes?.[role] ?? selected
     const options = old?.base ? [...choices, 'legacy'] : choices
-    catalog[role] = { label, options: options.map((id) => [id, labels[id]]) }
+    catalog[role] = {
+      label,
+      options: options.map((id) => [
+        id,
+        role === 'fetch' && id === 'official' ? '移动浏览器优先，DeepSeek Fetch 备用' : labels[id],
+      ]),
+    }
   }
   return { routes, catalog, vendors: { deepseek: { key } } }
 }

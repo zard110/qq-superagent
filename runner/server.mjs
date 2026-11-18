@@ -24,7 +24,7 @@ http
       }
       const input = Buffer.concat(chunks)
       const payload = JSON.parse(input)
-      if (!['python', 'video'].includes(payload.op)) throw Error('未知操作')
+      if (!['python', 'video', 'audio'].includes(payload.op)) throw Error('未知操作')
       const proc = spawn('docker', [
         'run',
         '--rm',

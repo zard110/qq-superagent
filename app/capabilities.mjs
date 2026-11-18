@@ -1,10 +1,12 @@
-import { key, resolve } from './messages.mjs'
+import { key, resolve, groupTime, historyBound } from './messages.mjs'
 import { provider, auth, remote, readPage, publicFile, chat } from './network.mjs'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, extname } from 'node:path'
+import { packageWheels, musicSource, artifactTypes } from './sandbox-tools.mjs'
 
 import { settings, selectedProvider } from './providers.mjs'
 import * as deepseek from './deepseek.mjs'
+import { publicShareLink, publicShareText } from './articles.mjs'
 const str = { type: 'string' }
 const definitions = {
   recognizeText: ['提取图片或 PDF 中的原文，按页返回', { resource: str }],
@@ -14,8 +16,14 @@ const definitions = {
   ],
   resolveReference: ['读取当前消息引用的文本、卡片与媒体句柄', {}],
   searchHistory: [
-    '检索本群留存的原始消息。按关键词、成员 ID、起止 ISO 时间筛选',
-    { keyword: str, author: str, from: str, until: str },
+    '检索本群留存消息。可按关键词、成员 ID 或群昵称、起止日期或 ISO 时间筛选。默认北京时间。另返回本群留存的群友消息总数、发言人数和起止时间。',
+    {
+      keyword: str,
+      author: str,
+      from: str,
+      until: str,
+      limit: { type: 'integer', minimum: 1, maximum: 40 },
+    },
   ],
   analyzeMedia: ['分析指定图片或视频；回答具体问题，视频引用时间码', { resource: str, question: str }],
   readWebPage: ['读取引用卡片、普通网址或搜索结果的网页正文', { url: str }],
@@ -23,12 +31,41 @@ const definitions = {
     '搜索公开网页以查证事实，query 只含公开关键词，可选站点和时间范围',
     { query: str, domain: str, timeRange: { type: 'string', enum: ['day', 'week', 'month', 'year'] } },
   ],
-  generateImage: ['生成图片或根据指定参考素材改图，仅在用户要求创作时调用', { prompt: str, resource: str }],
+  generateImage: [
+    '生成图片或根据指定参考素材改图，仅在用户要求创作时调用',
+    { prompt: str, resource: str },
+  ],
   scheduleReminder: [
     '按群管理员的明确请求创建提醒，at 使用含时区的未来 ISO 时间，interval 为 once/daily/weekly',
     { text: str, at: str, interval: { type: 'string', enum: ['once', 'daily', 'weekly'] } },
   ],
-  runCode: ['在一次性沙箱中运行 Python 数据处理程序，返回 stdout', { code: str }],
+  downloadResource: ['下载公开资源成为本群素材句柄；不用于网页正文', { url: str }],
+  resolveAudioSource: [
+    '从音乐卡片链接获取公开可播放音源，失败返回实际原因；不绕过会员或登录',
+    { url: str },
+  ],
+  editAudio: [
+    '用 Docker ffmpeg 裁剪音频；resource 为素材句柄，start/end 为秒。省略 end 截到结尾，返回可发送音频',
+    { resource: str, start: { type: 'number', minimum: 0 }, end: { type: 'number', minimum: 0 } },
+  ],
+  runCode: [
+    '一次性离线 Docker 中运行 Python，可用 subprocess 调 ffmpeg/ffprobe。inputs 素材写入当前目录；packages 按需安装 PyPI 纯Python wheel，需列出依赖。outputs 为输出相对文件名（支持图片、mp3/wav、mp4），作品返回群里；不允许联网或宿主安装。',
+    {
+      code: str,
+      packages: { type: 'array', items: str, maxItems: 8 },
+      inputs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { resource: str, name: str },
+          required: ['resource', 'name'],
+          additionalProperties: false,
+        },
+        maxItems: 4,
+      },
+      outputs: { type: 'array', items: str, maxItems: 1 },
+    },
+  ],
 }
 export const toolSpecs = Object.entries(definitions).map(([name, [description, properties]]) => ({
   type: 'function',
@@ -48,6 +85,9 @@ export const toolSpecs = Object.entries(definitions).map(([name, [description, p
           searchWeb: ['query'],
           generateImage: ['prompt'],
           runCode: ['code'],
+          downloadResource: ['url'],
+          resolveAudioSource: ['url'],
+          editAudio: ['resource', 'start'],
           scheduleReminder: ['text', 'at'],
         }[name] || [],
     },
@@ -61,6 +101,9 @@ const expected = {
   searchWeb: 'search',
   generateImage: 'image',
   runCode: 'Docker',
+  editAudio: 'Docker',
+  resolveAudioSource: '公开音源',
+  downloadResource: '公开资源',
   resolveReference: 'QQ',
   searchHistory: 'SQLite',
 }
@@ -88,8 +131,18 @@ export class Capabilities {
           synthesizeSpeech: '群内语音产物',
           scheduleReminder: '触发计划',
           runCode: '退出状态与标准输出',
+          editAudio: '剪辑时间、时长与群内音频产物',
+          resolveAudioSource: '公开音源的群内素材句柄',
+          downloadResource: '群内素材句柄与媒体类型',
         }[name],
-        media: name === 'analyzeMedia' ? ['image/*', 'video/*'] : name === 'generateImage' ? ['image/*'] : [],
+        media:
+          name === 'analyzeMedia'
+            ? ['image/*', 'video/*']
+            : name === 'generateImage'
+              ? ['image/*']
+              : name === 'editAudio'
+                ? ['audio/*', 'video/*']
+                : [],
         execute: (args, ctx) => this.builtin(name, args, ctx),
       })
     }
@@ -104,7 +157,8 @@ export class Capabilities {
   async run(name, args, ctx) {
     const adapter = this.registry.get(name)
     if (!adapter) throw Error('未知能力')
-    if (ctx.config.groups?.[ctx.m.group]?.disabled?.includes(name)) throw Error('管理员已在本群关闭此能力')
+    if (ctx.config.groups?.[ctx.m.group]?.disabled?.includes(name))
+      throw Error('管理员已在本群关闭此能力')
     return adapter.execute(args, ctx)
   }
   save(group, mime, bytes) {
@@ -121,6 +175,22 @@ export class Capabilities {
     return {
       missing,
       parts: parts.map((p) => {
+        if (p.type === 'text') {
+          for (const url of p.text.match(/https?:\/\/[^\s<>"）。，！？]+/gi) || []) {
+            const safe = publicShareLink(url)
+            if (url !== safe) this.rememberShare(m, safe, url)
+          }
+          return { ...p, text: publicShareText(p.text) }
+        }
+        if (p.type === 'card') {
+          const { preview, ...card } = p
+          card.url = publicShareLink(p.url)
+          if (card.url && card.url !== p.url) {
+            this.rememberShare(m, card.url, p.url)
+          }
+          if (preview) card.previewResource = this.webImage(m.group, preview)
+          return card
+        }
         if (p.type !== 'media') return p
         const id = p.resource || key(m.group, p.source, p.url)
         if (!p.resource && !this.store.get('resource', id))
@@ -129,11 +199,26 @@ export class Capabilities {
       }),
     }
   }
+  webImage(group, url) {
+    const id = key(group, 'web-image', url)
+    if (!this.store.get('resource', id))
+      this.store.put('resource', id, { id, group, url, mime: 'image/*', local: false })
+    return id
+  }
+  rememberShare(m, safe, url) {
+    const id = key(m.group, safe)
+    const old = this.store.get('shareLink', id)
+    if (!old || m.at >= old.at) this.store.put('shareLink', id, { url, at: m.at })
+  }
   async file(g, id) {
     const r = this.store.get('resource', id)
     if (!r || r.group !== g) throw Error('本群找不到此素材，请重新发送')
     if (!r.local) {
-      const { bytes } = await publicFile(r.url, 32 * 1024 * 1024)
+      const { bytes, mime } = await publicFile(r.url, 32 * 1024 * 1024)
+      if (r.mime === 'image/*') {
+        if (!/^image\/(jpeg|png|webp|gif)$/.test(mime)) throw Error('分享预览未返回支持的图片格式')
+        r.mime = mime
+      }
       writeFileSync(join(this.dir, id), bytes)
       this.store.put('resource', id, { id, group: g, mime: r.mime, local: true })
     }
@@ -168,21 +253,79 @@ export class Capabilities {
       return result(item, [m.id])
     }
     if (name === 'resolveReference') return result(this.reference(m), [m.id])
-    if (name === 'searchHistory') {
-      const rows = this.store.history(m.group, a).filter((v) => v.id !== m.id)
+    if (name === 'downloadResource' || name === 'resolveAudioSource') {
+      let url = a.url
+      if (name === 'resolveAudioSource') url = musicSource(url) || url
+      let file
+      try {
+        file = await this.download(url, 32 * 1024 * 1024)
+      } catch (e) {
+        throw Error(
+          (name === 'resolveAudioSource' ? '公开音源获取失败：' : '资源获取失败：') + e.message,
+        )
+      }
+      if (
+        name === 'resolveAudioSource' &&
+        !/^audio\//.test(file.mime) &&
+        !/^(application\/octet-stream|binary\/octet-stream)$/.test(file.mime)
+      )
+        throw Error('分享地址未提供公开音频，仅有网页或受限提示；需要可播放音频或用户上传原文件')
+      const resource = this.save(m.group, file.mime, file.bytes)
+      return result({ resource, mime: file.mime, bytes: file.bytes.length }, [publicShareLink(a.url)])
+    }
+    if (name === 'editAudio') {
+      if (ctx.social) throw Error('音频剪辑需要群友明确提出任务')
+      if (
+        !Number.isFinite(a.start) ||
+        a.start < 0 ||
+        (a.end !== undefined && (!Number.isFinite(a.end) || a.end <= a.start))
+      )
+        throw Error('剪辑起止秒数无效')
+      const file = await this.file(m.group, a.resource)
+      const output = await this.sandbox({
+        op: 'audio',
+        data: file.bytes.toString('base64'),
+        start: a.start,
+        end: a.end,
+      })
+      if (output.error) throw Error(output.error)
       return result(
+        {
+          artifact: this.save(m.group, 'audio/mpeg', Buffer.from(output.data, 'base64')),
+          start: a.start,
+          end: output.end,
+          duration: output.duration,
+        },
+        [a.resource],
+      )
+    }
+    if (name === 'searchHistory') {
+      const rows = this.store.history(m.group, {
+        ...a,
+        excludeId: m.id,
+        from: historyBound(a.from),
+        until: historyBound(a.until, true),
+      })
+      const stats = this.store.memberHistoryStats(m.group)
+      const response = result(
         rows.map((v) => ({
           id: v.id,
-          at: v.at,
-          text: v.text,
+          at: groupTime(v.at),
+          text: publicShareText(v.text),
           author: v.author,
+          nickname: v.author === '@bot' ? '机器人' : v.nickname || undefined,
           parts: this.reference(v).parts.slice(0, 12),
         })),
         rows.map((v) => v.id),
       )
+      response.memberHistory = { ...stats, first: groupTime(stats.first), last: groupTime(stats.last) }
+      return response
     }
     if (name === 'recognizeText') {
-      const pages = await deepseek.recognize(provider(config, 'ocr'), await this.file(m.group, a.resource))
+      const pages = await deepseek.recognize(
+        provider(config, 'ocr'),
+        await this.file(m.group, a.resource),
+      )
       return result(pages, [m.id, a.resource])
     }
     if (name === 'synthesizeSpeech') {
@@ -192,22 +335,34 @@ export class Capabilities {
       return result({ artifact: this.save(m.group, 'audio/wav', audio) }, [m.id])
     }
     if (name === 'readWebPage') {
+      const url = publicShareLink(a.url)
+      const original = this.store.get('shareLink', key(m.group, url))?.url || a.url
+      const fetchProvider = selectedProvider(config, 'fetch')
+      if (!fetchProvider) throw Error('网页读取已关闭')
+      let page, detail
+      let reader = process.env.BROWSER_URL ? 'Docker 移动浏览器' : '公开网页直读'
       try {
-        const p = provider(config, 'fetch')
-        const page = p.kind === 'deepseek' ? await deepseek.read(p, a.url) : await readPage(a.url)
-        if (page.status === 'restricted')
-          page.card = this.reference(m).parts.find((p) => p.type === 'card' && p.url === a.url)
-        return result(page, [a.url], page.status)
+        page = await readPage(original)
+        detail = page.detail
       } catch (e) {
-        return result(
-          {
-            detail: e.message,
-            card: this.reference(m).parts.find((p) => p.type === 'card' && p.url === a.url),
-          },
-          [a.url],
-          'partial',
-        )
+        detail = e.message
       }
+      if (page?.status !== 'read' && fetchProvider.kind === 'deepseek' && fetchProvider.key) {
+        reader += ' → DeepSeek Fetch'
+        try {
+          const hosted = await deepseek.read(fetchProvider, url)
+          if (hosted.status === 'read') page = hosted
+        } catch (e) {
+          detail = [detail, 'DeepSeek Fetch：' + e.message].filter(Boolean).join('；')
+        }
+      }
+      page ||= { status: 'partial' }
+      page.url = url
+      page.detail = detail
+      page.images = (page.images || []).map((image) => this.webImage(m.group, image))
+      if (page.status !== 'read')
+        page.card = this.reference(m).parts.find((p) => p.type === 'card' && p.url === url)
+      return { ...result(page, [url], page.status), provider: reader }
     }
     if (name === 'searchWeb') {
       const p = provider(config, 'search')
@@ -215,7 +370,11 @@ export class Capabilities {
       if (!q || /https?:\/\/|(?:rkey|auth_token)=|[A-Fa-f0-9]{32}/.test(q))
         throw Error('搜索词请只使用公开关键词')
       if (p.kind === 'deepseek') {
-        const hits = await deepseek.search(p, q, a.domain, a.timeRange)
+        const includeContent =
+          a.includeContent === true &&
+          selectedProvider(config, 'fetch') &&
+          !config.groups[m.group]?.disabled?.includes('readWebPage')
+        const hits = await deepseek.search(p, q, a.domain, a.timeRange, !!includeContent)
         return result(
           hits,
           hits.map((h) => h.url),
@@ -242,15 +401,55 @@ export class Capabilities {
       )
     }
     if (name === 'runCode') {
-      if (!ctx.worker || !config.groups[m.group]?.code) throw Error('该群尚未授权沙箱代码执行')
-      return result(await this.sandbox({ op: 'python', code: a.code }))
+      if (!ctx.worker || ctx.social || config.groups[m.group]?.code === false)
+        throw Error('该群尚未授权沙箱代码执行')
+      const safeName = (name) =>
+        typeof name === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(name)
+      if ((a.inputs?.length || 0) > 4 || (a.outputs?.length || 0) > 1)
+        throw Error('一次最多四个输入和一个输出')
+      const inputs = []
+      for (const input of a.inputs || []) {
+        if (!safeName(input.name)) throw Error('输入文件名无效')
+        const file = await this.file(m.group, input.resource)
+        inputs.push({ name: input.name, data: file.bytes.toString('base64') })
+      }
+      for (const name of a.outputs || [])
+        if (!safeName(name) || !artifactTypes[extname(name).toLowerCase()])
+          throw Error('输出需为支持的图片、音频或 mp4 文件')
+      const wheels = await packageWheels(a.packages, this.download)
+      const output = await this.sandbox({
+        op: 'python',
+        code: a.code,
+        inputs,
+        outputs: a.outputs || [],
+        wheels,
+      })
+      const files = output.files || []
+      delete output.files
+      if (output.error) throw Error(output.error)
+      if (files.length && output.exit === 0)
+        output.artifact = this.save(
+          m.group,
+          artifactTypes[extname(files[0].name).toLowerCase()],
+          Buffer.from(files[0].data, 'base64'),
+        )
+      output.installed = wheels.map((w) => ({ name: w.package, version: w.version }))
+      return result(
+        output,
+        (a.inputs || []).map((i) => i.resource),
+        output.exit === 0 ? 'ok' : 'failed',
+      )
     }
     if (name === 'generateImage') {
       if (!ctx.worker || ctx.social) throw Error('生成作品需要群友明确发起的任务')
-      const images = this.reference(m).parts.filter((p) => p.type === 'media' && p.mime.startsWith('image/'))
+      const images = this.reference(m).parts.filter(
+        (p) => p.type === 'media' && p.mime.startsWith('image/'),
+      )
       const resource =
         a.resource ||
-        (images.length === 1 && /照|参考|改|重做|横版|横屏/.test(m.text) ? images[0].resource : undefined)
+        (images.length === 1 && /照|参考|改|重做|横版|横屏/.test(m.text)
+          ? images[0].resource
+          : undefined)
       return result(await this.generate(ctx, { ...a, resource }))
     }
     const file = await this.file(m.group, a.resource)
@@ -270,7 +469,8 @@ export class Capabilities {
         const segments = await deepseek.transcribe(speech, sample.audioChunks)
         content.push({
           type: 'text',
-          text: '分段转写 [起始秒,结束秒,文本]。时间为片段范围：' + JSON.stringify(segments).slice(0, 24000),
+          text:
+            '分段转写 [起始秒,结束秒,文本]。时间为片段范围：' + JSON.stringify(segments).slice(0, 24000),
         })
       }
       detail = '视频抽样，时长 ' + sample.duration + ' 秒'
@@ -287,7 +487,11 @@ export class Capabilities {
         const speech = provider(config, 'speech'),
           form = new FormData()
         form.set('model', speech.model)
-        form.set('file', new Blob([Buffer.from(sample.audio, 'base64')], { type: 'audio/mpeg' }), 'clip.mp3')
+        form.set(
+          'file',
+          new Blob([Buffer.from(sample.audio, 'base64')], { type: 'audio/mpeg' }),
+          'clip.mp3',
+        )
         form.set('response_format', 'verbose_json')
         form.append('timestamp_granularities[]', 'segment')
         const transcript = await remote(speech.base.replace(/\/$/, '') + '/audio/transcriptions', {

@@ -6,8 +6,13 @@ services:
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RUNNER_URL: http://runner:8090
+      BROWSER_URL: http://browser:8091
     volumes: ["state:/state"]
-    depends_on: [runner]
+    depends_on:
+      runner:
+        condition: service_started
+      browser:
+        condition: service_healthy
     networks: [default, workers]
   runner:
     build: ./runner
@@ -17,6 +22,22 @@ services:
     depends_on:
       sandbox:
         condition: service_completed_successfully
+  browser:
+    build:
+      context: .
+      dockerfile: browser/Dockerfile
+    restart: unless-stopped
+    init: true
+    shm_size: 256mb
+    mem_limit: 768m
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks: [default]
   sandbox:
     build: ./sandbox
     image: qq-superagent-sandbox:local

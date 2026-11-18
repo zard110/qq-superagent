@@ -8,6 +8,7 @@ import { Capabilities } from './capabilities.mjs'
 import { Runtime } from './runtime.mjs'
 import { QQ } from './qq.mjs'
 import { key } from './messages.mjs'
+import { publicShareLink } from './articles.mjs'
 import { settings, selectedProvider } from './providers.mjs'
 
 const dir = resolve(process.env.STATE_DIR || 'state')
@@ -21,6 +22,9 @@ const store = new Store(join(dir, 'bot.sqlite')),
   app = new Runtime(store, caps),
   qq = new QQ(app)
 qq.enabled = true
+if (store.config().qq.appId) {
+  for (const { g } of store.db.prepare('SELECT DISTINCT g FROM messages').all()) qq.warmDirectory(g)
+}
 function publicConfig() {
   const c = store.config()
   const profile = settings(c)
@@ -150,8 +154,11 @@ const server = http.createServer(async (req, res) => {
             name,
             provider: result.provider,
             status: result.status,
-            sources: result.sources,
-            detail: result.detail,
+            sources: result.sources?.map(publicShareLink),
+            detail: result.detail || result.data?.detail,
+            ...(name === 'readWebPage'
+              ? { title: result.data?.title, charactersRead: result.data?.text?.length || 0 }
+              : {}),
           })),
         answer: run.answer,
       })
@@ -173,6 +180,7 @@ const server = http.createServer(async (req, res) => {
       if (body.file) {
         if (
           !/^(image|video)\//.test(body.file.mime) &&
+          !(body.name === 'editAudio' && /^audio\//.test(body.file.mime)) &&
           !(body.name === 'recognizeText' && body.file.mime === 'application/pdf')
         )
           throw Error('不支持的测试文件类型')
@@ -185,6 +193,8 @@ const server = http.createServer(async (req, res) => {
           'searchWeb',
           'recognizeText',
           'synthesizeSpeech',
+          'editAudio',
+          'resolveAudioSource',
           'chat',
           'worker',
         ].includes(body.name)
@@ -201,8 +211,11 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const result = await caps.run(body.name, args, { config: store.config(), m, adminTest: true })
-        if (body.name === 'synthesizeSpeech' && result.data?.artifact)
-          result.audio = (await caps.file(group, result.data.artifact)).bytes.toString('base64')
+        if (['synthesizeSpeech', 'editAudio'].includes(body.name) && result.data?.artifact) {
+          const file = await caps.file(group, result.data.artifact)
+          result.audio = file.bytes.toString('base64')
+          result.audioMime = file.mime
+        }
         return json(result)
       } catch (e) {
         const adapter = caps.registry.get(body.name)

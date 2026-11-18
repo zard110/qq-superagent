@@ -9,6 +9,208 @@ export class QQ {
     this.store = runtime.store
     this.status = '等待配置'
     this.enabled = false
+    this.directoryLoads = new Map()
+    this.initializedGroups = new Set()
+    runtime.caps.register({
+      spec: {
+        type: 'function',
+        function: {
+          name: 'getGroupInfo',
+          description:
+            'info 查群名和人数；bot_state 查接收范围；member 用 query 按 ID 或准确昵称查本群已知成员（可能同名）；members 按页读取首次缓存的正式名单。仅在用户要求更新名单时设置 refresh。',
+          parameters: {
+            type: 'object',
+            properties: {
+              topic: { type: 'string', enum: ['info', 'bot_state', 'member', 'members'] },
+              cursor: { type: 'string' },
+              query: { type: 'string' },
+              refresh: { type: 'boolean' },
+            },
+            required: ['topic'],
+            additionalProperties: false,
+          },
+        },
+      },
+      provider: 'QQ',
+      media: [],
+      output: 'QQ 群资料、接收设置或一页成员名单及权限状态',
+      execute: (args, ctx) =>
+        this.groupInfo(ctx.m.group, {
+          ...args,
+          refresh: args.refresh === true && /刷新|同步|更新|重新(查|拉|获取)/.test(ctx.m.text || ''),
+        }),
+    })
+  }
+  warmDirectory(group) {
+    if (
+      !group ||
+      this.initializedGroups.has(group) ||
+      this.store.config().groups[group]?.disabled?.includes('getGroupInfo')
+    )
+      return
+    this.initializedGroups.add(group)
+    void this.directory(group).catch(() => {
+      // Explicit member lookups can retry transient failures; normal messages stay offline.
+    })
+  }
+  async directory(group, refresh = false) {
+    const pending = this.directoryLoads.get(group)
+    if (pending) return pending
+    const cached = this.store.get('memberRoster', group)
+    if (cached && !refresh) return cached
+    const task = this.loadDirectory(group)
+    this.directoryLoads.set(group, task)
+    try {
+      return await task
+    } finally {
+      this.directoryLoads.delete(group)
+    }
+  }
+  async loadDirectory(group) {
+    const pages = [],
+      members = [],
+      seen = new Set()
+    const at = new Date().toISOString()
+    let cursor = ''
+    try {
+      do {
+        if (seen.has(cursor)) throw Error('群成员名单分页游标重复')
+        seen.add(cursor)
+        if (cursor) await new Promise((resolve) => setTimeout(resolve, 1050))
+        const page = await this.request(
+          '/v2/groups/' +
+            encodeURIComponent(group) +
+            '/members' +
+            (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''),
+        )
+        const people = page.members.map((m) => ({
+          id: m.member_openid,
+          username: m.username,
+          role: m.member_role,
+          bot: !!m.bot,
+        }))
+        pages.push({ cursor, ids: people.map((p) => p.id), nextCursor: page.next_cursor || null })
+        members.push(...people)
+        cursor = page.next_cursor
+      } while (cursor)
+    } catch (e) {
+      if (Number(e.code) !== 11253) throw e
+      return this.store.put('memberRoster', group, { status: 'restricted', code: 11253, at })
+    }
+    return this.store.atomic(() => {
+      for (const member of members) this.store.rememberMember(group, member, at)
+      return this.store.put('memberRoster', group, { status: 'ok', pages, at })
+    })
+  }
+  async groupInfo(group, { topic, cursor, query, refresh }) {
+    if (!['info', 'bot_state', 'member', 'members'].includes(topic)) throw Error('未知的群资料类型')
+    const source = '/v2/groups/' + encodeURIComponent(group) + '/' + topic
+    const result = { capability: 'getGroupInfo', provider: 'QQ', sources: [source] }
+    if (topic === 'member') {
+      if (!query?.trim()) throw Error('请提供群昵称或成员 ID')
+      const value = query.trim()
+      const lookup = () => {
+        const member = this.store.member(group, value)
+        return member ? [member] : this.store.namedMembers(group, value)
+      }
+      let matches = lookup()
+      const byId = matches.length === 1 && matches[0].id === value
+      if (byId && (!matches[0].name || refresh)) {
+        if (refresh || !this.store.get('memberDetailDenied', group)) {
+          try {
+            const person = await this.request(
+              '/v2/groups/' + encodeURIComponent(group) + '/members/' + encodeURIComponent(value),
+            )
+            if (person.member_openid === value)
+              this.store.rememberMember(
+                group,
+                {
+                  id: value,
+                  username: person.username,
+                  role: person.member_role,
+                  bot: person.bot,
+                },
+                new Date().toISOString(),
+              )
+            this.store.del('memberDetailDenied', group)
+          } catch (e) {
+            if (Number(e.code) !== 11253) throw e
+            this.store.put('memberDetailDenied', group, true)
+          }
+          matches = lookup()
+        }
+      } else if (!matches.length || refresh) {
+        await this.directory(group, refresh)
+        matches = lookup()
+      }
+      return {
+        ...result,
+        provider: '本群成员缓存',
+        sources: [],
+        status: 'ok',
+        data: {
+          matches,
+          scope:
+            '本群已知的 OpenID 或昵称。未命中不能用来判断此人是否在群，普通 QQ 号无法换算为群成员 OpenID。',
+        },
+      }
+    }
+    if (topic === 'members') {
+      const roster = await this.directory(group, refresh)
+      if (roster.status === 'restricted')
+        return {
+          ...result,
+          status: 'restricted',
+          data: {
+            code: roster.code,
+            ...this.store.observedMembers(group, cursor),
+            complete: false,
+            detail:
+              '以下是本群已记录的身份。完整名册未获授权；无法按个人 QQ 号判断是否在群。若要识别尚未记录的人，可请群友在本群 @ 对方或由对方发言。',
+          },
+        }
+      const page = roster.pages.find((p) => p.cursor === (cursor || ''))
+      if (!page) throw Error('名单游标已失效，请从第一页开始')
+      return {
+        ...result,
+        status: 'ok',
+        data: {
+          members: page.ids.map((id) => this.store.member(group, id)),
+          nextCursor: page.nextCursor,
+          asOf: roster.at,
+        },
+      }
+    }
+    try {
+      if (topic === 'info' && !refresh) {
+        const cached = this.store.get('groupInfo', group)
+        if (cached && Date.now() - cached.at < 300000)
+          return { ...result, status: 'ok', data: cached.data }
+      }
+      const row = await this.request(source)
+      let data
+      if (topic === 'info') {
+        data = { name: row.group_name, memberCount: row.group_member_num }
+        this.store.put('groupInfo', group, { at: Date.now(), data })
+      }
+      if (topic === 'bot_state')
+        data = {
+          messageScope: row.recv_msg_setting,
+          proactive: row.allow_proactive_msg,
+          joinedAt: row.joined_at,
+        }
+      return { ...result, status: 'ok', data }
+    } catch (e) {
+      if (Number(e.code) !== 11253) throw e
+      return {
+        ...result,
+        status: 'restricted',
+        data: {
+          code: 11253,
+          detail: 'QQ 未向当前机器人开放此接口。群总人数可另查 info，已发言者可查本群留存历史。',
+        },
+      }
+    }
   }
   async token() {
     if (this.cached?.until > Date.now()) return this.cached.token
@@ -28,7 +230,7 @@ export class QQ {
       headers: { Authorization: 'QQBot ' + token, 'content-type': 'application/json' },
       ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}),
     })
-    if (result.code) throw Error('QQ 业务错误 ' + result.code)
+    if (result.code) throw Object.assign(Error('QQ 业务错误 ' + result.code), { code: result.code })
     return result
   }
   async connect() {
@@ -71,7 +273,8 @@ export class QQ {
               const cursor = this.store.get('qq', 'gateway') || {}
               if (t === 'READY') cursor.session = d.session_id
               this.status = '已连接'
-              this.app.receive(t, d)
+              const message = this.app.receive(t, d)
+              if (message) this.warmDirectory(message.group)
               this.store.put('qq', 'gateway', { ...cursor, app: this.store.config().qq.appId, seq: s })
             })
         } catch {
@@ -105,12 +308,22 @@ export class QQ {
     const { bytes, mime } = await this.app.caps.file(group, id)
     const path = '/v2/groups/' + encodeURIComponent(group)
     const data = {
-      file_type: mime === 'audio/wav' ? 3 : 1,
-      file_name: id + (mime === 'audio/wav' ? '.wav' : mime === 'image/jpeg' ? '.jpg' : '.png'),
+      file_type: mime.startsWith('audio/') ? 3 : mime.startsWith('video/') ? 2 : 1,
+      file_name:
+        id +
+        ({
+          'audio/wav': '.wav',
+          'audio/mpeg': '.mp3',
+          'audio/flac': '.flac',
+          'video/mp4': '.mp4',
+          'image/jpeg': '.jpg',
+          'image/gif': '.gif',
+        }[mime] || '.png'),
       srv_send_msg: false,
     }
     if (bytes.length < 5_000_000)
-      return (await this.request(path + '/files', { ...data, file_data: bytes.toString('base64') })).file_info
+      return (await this.request(path + '/files', { ...data, file_data: bytes.toString('base64') }))
+        .file_info
     const prep = await this.request(path + '/upload_prepare', {
       ...data,
       file_size: String(bytes.length),
@@ -166,7 +379,7 @@ export class QQ {
         }
         const body = o.artifact
           ? { msg_type: 7, media: { file_info: await this.upload(o.group, o.artifact) } }
-          : { msg_type: 0, content: o.text }
+          : { msg_type: 2, markdown: { content: o.text } }
         if (passive) Object.assign(body, { msg_id: origin.id, msg_seq: o.seq })
         if (!passive) {
           o.activeAttempt = true

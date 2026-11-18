@@ -62,7 +62,9 @@ function card(name, html) {
   return '<section><h2>' + escape(name) + '</h2>' + html + '</section>'
 }
 function item(title, detail) {
-  return '<div class="item"><strong>' + escape(title) + '</strong><small>' + escape(detail) + '</small></div>'
+  return (
+    '<div class="item"><strong>' + escape(title) + '</strong><small>' + escape(detail) + '</small></div>'
+  )
 }
 const val = (id) => $('#' + id).value
 const btn = (id, title) => '<button id="' + id + '">' + title + '</button>'
@@ -110,7 +112,9 @@ function render() {
         '任务',
         btn('reload', '刷新') +
           state.runs
-            .map((r) => item(r.question, r.group + ' · ' + r.state + ' · ' + (r.answer || r.ticket || '')))
+            .map((r) =>
+              item(r.question, r.group + ' · ' + r.state + ' · ' + (r.answer || r.ticket || '')),
+            )
             .join('') +
           (state.runs.length ? '' : '<p>等待群消息</p>'),
       ) +
@@ -214,12 +218,16 @@ function render() {
       await save()
     })
     const switches = {
+      getGroupInfo: '查询本群资料与成员',
       recognizeText: '文字识别',
       synthesizeSpeech: '语音合成',
       searchWeb: '公开网页搜索',
       readWebPage: '读取链接正文',
       analyzeMedia: '图片与视频理解',
       generateImage: '生图与改图',
+      resolveAudioSource: '获取公开音乐音源',
+      editAudio: '音频剪辑',
+      downloadResource: '下载公开素材',
       scheduleReminder: '群内设置提醒',
     }
     function policy() {
@@ -243,8 +251,8 @@ function render() {
         '<label><input id="active" type="checkbox" ' +
         (p.active ? 'checked' : '') +
         '> 允许主动投递</label><label><input id="code" type="checkbox" ' +
-        (p.code ? 'checked' : '') +
-        '> 允许子 Agent 执行沙箱代码</label>' +
+        (p.code !== false ? 'checked' : '') +
+        '> 允许子 Agent 执行沙箱代码及按需安装 Python 工具包</label>' +
         Object.entries(switches)
           .map(
             ([k, label]) =>
@@ -287,15 +295,26 @@ function render() {
         ['worker', '子 Agent'],
         ['recognizeText', '文字识别（图片或 PDF）'],
         ['synthesizeSpeech', '语音合成'],
+        ['editAudio', '音频剪辑（上传音频）'],
+        ['resolveAudioSource', '音乐卡片公开音源（输入 URL）'],
         ['readWebPage', '读取网页'],
         ['searchWeb', '搜索公开网页'],
         ['analyzeMedia', '图片或视频理解'],
       ]) +
         field('query', '问题、搜索词或网页 URL') +
-        '<label>素材<input id="media" type="file" accept="image/*,video/*,application/pdf"></label>' +
+        '<label>素材<input id="media" type="file" accept="image/*,video/*,audio/*,application/pdf"></label>' +
+        '<div id="audioOptions" hidden>' +
+        field('clipStart', '音频起点（秒）', '0', 'number') +
+        field('clipEnd', '音频终点（秒，留空到结尾）', '', 'number') +
+        '</div>' +
         btn('test', '开始测试') +
         '<pre id="output"></pre>',
     )
+    $('#skill').onchange = () => {
+      const audio = val('skill') === 'editAudio'
+      $('#audioOptions').hidden = !audio
+      $('#query').parentElement.hidden = audio
+    }
     on('test', async () => {
       const button = $('#test')
       button.disabled = true
@@ -305,7 +324,7 @@ function render() {
           q = val('query'),
           name = val('skill')
         let file
-        if (f && ['analyzeMedia', 'recognizeText'].includes(name)) {
+        if (f && ['analyzeMedia', 'recognizeText', 'editAudio'].includes(name)) {
           if (f.size > 32 * 1024 * 1024) throw Error('素材超过 32 MiB')
           file = {
             mime: f.type,
@@ -320,7 +339,18 @@ function render() {
         const result = await api('test', {
           name,
           question: q,
-          args: { question: q, text: q, url: q, query: q },
+          args: {
+            question: q,
+            text: q,
+            url: q,
+            query: q,
+            ...(name === 'editAudio'
+              ? {
+                  start: Number(val('clipStart')),
+                  ...(val('clipEnd').trim() ? { end: Number(val('clipEnd')) } : {}),
+                }
+              : {}),
+          },
           file,
         })
         const wav = result.audio
@@ -329,7 +359,7 @@ function render() {
         if (wav) {
           const player = document.createElement('audio')
           player.controls = true
-          player.src = 'data:audio/wav;base64,' + wav
+          player.src = 'data:' + (result.audioMime || 'audio/wav') + ';base64,' + wav
           $('#output').append(player)
         }
       } catch (e) {
@@ -344,7 +374,7 @@ function render() {
       card(
         '创建提醒',
         field('dest', '目标群 OpenID') +
-          field('when', '首次触发（本地时间）', '', 'datetime-local') +
+          field('when', '首次触发（北京时间）', '', 'datetime-local') +
           select('repeat', '重复', [
             ['0', '仅一次'],
             ['86400000', '每天'],
@@ -358,14 +388,20 @@ function render() {
         state.schedules
           .map(
             (s, i) =>
-              item(s.text, s.group + ' · ' + new Date(s.next).toLocaleString()) + btn('remove' + i, '移除'),
+              item(
+                s.text,
+                s.group +
+                  ' · ' +
+                  new Date(s.next).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) +
+                  ' 北京时间',
+              ) + btn('remove' + i, '移除'),
           )
           .join(''),
       )
     on('add', async () => {
       await api('schedule', {
         group: val('dest'),
-        at: new Date(val('when')).toISOString(),
+        at: new Date(val('when') + '+08:00').toISOString(),
         every: Number(val('repeat')),
         text: val('text'),
       })

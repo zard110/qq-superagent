@@ -1,4 +1,5 @@
 FROM node:24-bookworm-slim
+ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund

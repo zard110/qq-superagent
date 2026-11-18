@@ -1,6 +1,17 @@
 import { createHash } from 'node:crypto'
 export const key = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)
 const clean = (v) => (typeof v === 'string' ? v.slice(0, 16000) : '')
+export function groupTime(iso) {
+  return iso && new Date(Date.parse(iso) + 8 * 3600000).toISOString().replace('Z', '+08:00')
+}
+export function historyBound(value, end = false) {
+  if (!value) return undefined
+  let time = value.trim()
+  if (/^\d{4}-\d\d-\d\d$/.test(time)) time += end ? 'T23:59:59.999' : 'T00:00:00'
+  if (!/(Z|[+-]\d\d:\d\d)$/i.test(time)) time += '+08:00'
+  if (!Number.isFinite(Date.parse(time))) throw Error('历史查询需要 ISO 日期或时间')
+  return new Date(time).toISOString()
+}
 function fields(scene) {
   return Object.fromEntries(
     (scene?.ext || [])
@@ -34,19 +45,32 @@ export function normalize(type, d) {
       parts.push({
         type: 'card',
         title: clean(f.title),
+        site: clean(f.source || f.tag),
+        preview: clean(f.preview),
         summary: clean(f.desc || e.ark_data.prompt),
-        url: clean(f.jump_url),
+        url: clean(f.jump_url || f.url),
         source,
       })
     }
     for (const child of e.msg_elements || []) walk(child, depth + 1)
   }
   walk(d)
+  const mentions = (d.mentions || []).map((user) => ({
+    id: clean(user.member_openid || user.id),
+    name: clean(user.member_nickname || user.username),
+    username: clean(user.username),
+    role: clean(user.member_role),
+    bot: !!(user.bot || user.is_you),
+    self: !!user.is_you,
+    scope: user.scope === 'all' ? 'all' : 'single',
+  }))
   return {
     group,
     id: d.id,
     idx: meta.msg_idx || d.id,
     author: d.author?.member_openid || d.author?.id || '',
+    nickname: clean(d.author?.member_nickname || d.author?.username),
+    username: clean(d.author?.username),
     role: d.author?.member_role || 'member',
     at: new Date(d.timestamp || Date.now()).toISOString(),
     text:
@@ -58,9 +82,47 @@ export function normalize(type, d) {
           .join(' '),
       ),
     parts,
+    mentions,
     refs: [...refs],
     mention: type === 'GROUP_AT_MESSAGE_CREATE' || d.mentions?.some((m) => m.is_you) === true,
   }
+}
+export function replyMentions(text, m, store) {
+  if (!text) return text
+  // Only the current message can request a notification; resolved quotes and history cannot.
+  const request = m.text || ''
+  const selfRequest =
+    /(?:^|[\s，。！？、：,!:>]|请|要|记得|记住|直接|可以|能|再|先|时|时候|你|一下)(?:@|艾特|at)\s*我(?!们|的|了)/i.test(
+      request,
+    )
+  const skipSelf = /(?:别|不要|不用|不必|无需|禁止|不需要)\s*(?:再|特意|你)?\s*(?:@|艾特|at)\s*我/i.test(
+    request,
+  )
+  const sender = /^[\w-]+$/.test(m.author || '') && m.author !== 'all' ? m.author : ''
+  const sent = new Set()
+  const content = text
+    .replace(/<@!?([\w-]+)>/g, (_, id) => {
+      if (id === 'sender') id = sender
+      if (id === sender && (selfRequest || skipSelf)) return ''
+      const tagged = m.mentions?.find((u) => u.id === id)
+      const person = store.member(m.group, id)
+      if (selfRequest && id !== sender && !tagged && !(person?.name && request.includes(person.name)))
+        return ''
+      if (
+        !id ||
+        id === 'all' ||
+        tagged?.self ||
+        tagged?.bot ||
+        person?.bot ||
+        (!person && id !== sender && !tagged) ||
+        sent.has(id)
+      )
+        return ''
+      sent.add(id)
+      return '<@' + id + '>'
+    })
+    .trim()
+  return selfRequest && !skipSelf && sender ? ('<@' + sender + '> ' + content).trim() : content
 }
 export function resolve(store, m) {
   const parts = [...m.parts],
@@ -78,8 +140,25 @@ export function resolve(store, m) {
     original.refs.forEach((r) => visit(r, depth + 1))
   }
   m.refs.forEach((r) => visit(r, 0))
+  // Some QQ mini-apps repeat the card fields in a text element. Older stored
+  // cards retained this text but discarded the source label.
+  const enriched = parts.map((p) => {
+    if (p.type !== 'card' || (p.site && p.url && p.preview)) return p
+    const cardText = parts.find(
+      (v) =>
+        v.type === 'text' &&
+        v.source === p.source &&
+        v.text.startsWith('[卡片消息]') &&
+        v.text.split(/\r?\n/).some((line) => line.trim() === 'title: ' + p.title),
+    )
+    if (!cardText) return p
+    const site = cardText.text.match(/^(?:source|tag):[ \t]*([^\r\n]+)/m)?.[1]?.trim()
+    const preview = cardText.text.match(/^preview:[ \t]*(https?:\/\/[^\s]+)/m)?.[1]
+    const url = cardText.text.match(/^(?:jump_url|url):[ \t]*(https?:\/\/[^\s]+)/m)?.[1]
+    return { ...p, site: p.site || site, url: p.url || url || '', preview: p.preview || preview }
+  })
   return {
-    parts: parts.filter((p, i, a) => a.findIndex((o) => JSON.stringify(o) === JSON.stringify(p)) === i),
+    parts: enriched.filter((p, i, a) => a.findIndex((o) => JSON.stringify(o) === JSON.stringify(p)) === i),
     missing,
   }
 }

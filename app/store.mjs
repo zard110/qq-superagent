@@ -10,8 +10,19 @@ export class Store {
       CREATE TABLE IF NOT EXISTS records(bucket TEXT, id TEXT, body TEXT NOT NULL, PRIMARY KEY(bucket,id));
       CREATE TABLE IF NOT EXISTS messages(g TEXT,id TEXT, idx TEXT, author TEXT, at TEXT, text TEXT, thread TEXT, body TEXT, PRIMARY KEY(g,id));
       CREATE INDEX IF NOT EXISTS idx_ref ON messages(g,idx);
+      CREATE TABLE IF NOT EXISTS group_members(g TEXT, id TEXT, name TEXT, role TEXT, bot INTEGER, at TEXT, username TEXT, PRIMARY KEY(g,id));
+      CREATE INDEX IF NOT EXISTS member_name ON group_members(g,name);
       CREATE INDEX IF NOT EXISTS history ON messages(g,at);`)
     this.depth = 0
+    if (!this.get('migration', 'group-members-1'))
+      this.atomic(() => {
+        for (const row of this.db
+          .prepare("SELECT body FROM messages WHERE author!='@bot' ORDER BY at,rowid")
+          .iterate()) {
+          this.observeMembers(JSON.parse(row.body))
+        }
+        this.put('migration', 'group-members-1', true)
+      })
     const collection = (bucket, field = 'id') => ({
       get: (id) => this.get(bucket, id),
       save: (value) => this.put(bucket, value[field], value),
@@ -110,15 +121,81 @@ export class Store {
       .get(g, id, id)
     return r && JSON.parse(r.body)
   }
-  history(g, { keyword = '', author = '', from = '', until = '9999', thread = '', limit = 12 } = {}) {
+  rememberMember(g, member, at) {
+    if (!member.id || member.id === 'all' || member.scope === 'all') return
+    this.db
+      .prepare(
+        `INSERT INTO group_members VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(g,id) DO UPDATE SET
+      name=CASE WHEN excluded.name!='' AND (excluded.at>=at OR name='') THEN excluded.name ELSE name END,
+      role=CASE WHEN excluded.role!='' AND (excluded.at>=at OR role='') THEN excluded.role ELSE role END,
+      username=CASE WHEN excluded.username!='' AND (excluded.at>=at OR username='') THEN excluded.username ELSE username END,
+      bot=max(bot,excluded.bot), at=max(at,excluded.at)`,
+      )
+      .run(
+        g,
+        member.id,
+        member.name || '',
+        member.role || '',
+        Number(!!member.bot),
+        at,
+        member.username || '',
+      )
+  }
+  observeMembers(m) {
+    this.rememberMember(m.group, { id: m.author, name: m.nickname, username: m.username, role: m.role }, m.at)
+    for (const member of m.mentions || []) this.rememberMember(m.group, member, m.at)
+  }
+  member(g, id) {
     return this.db
       .prepare(
-        "SELECT body FROM messages WHERE g=? AND at>=? AND at<=? AND (?='' OR author=?) AND (?='' OR thread=?) AND instr(lower(text),lower(?))>0 ORDER BY at DESC,rowid DESC LIMIT ?",
+        "SELECT id,coalesce(nullif(name,''),username) AS name,username,role,bot FROM group_members WHERE g=? AND id=?",
+      )
+      .get(g, id)
+  }
+  namedMembers(g, name) {
+    return this.db
+      .prepare(
+        "SELECT id,coalesce(nullif(name,''),username) AS name,username,role,bot FROM group_members WHERE g=? AND (name=? OR username=?) ORDER BY id LIMIT 40",
+      )
+      .all(g, name, name)
+  }
+  observedMembers(g, after = '') {
+    const rows = this.db
+      .prepare(
+        "SELECT id,coalesce(nullif(name,''),username) AS name,role,bot FROM group_members WHERE g=? AND id>? ORDER BY id LIMIT 31",
+      )
+      .all(g, after)
+    return {
+      members: rows.slice(0, 30),
+      nextCursor: rows.length > 30 ? rows[29].id : null,
+      observedCount: this.db.prepare('SELECT count(*) AS n FROM group_members WHERE g=?').get(g).n,
+    }
+  }
+  memberHistoryStats(g) {
+    return this.db
+      .prepare(
+        "SELECT count(*) AS messages, count(DISTINCT nullif(author,'')) AS speakers, min(at) AS first, max(at) AS last FROM messages WHERE g=? AND author!='@bot'",
+      )
+      .get(g)
+  }
+  history(
+    g,
+    { keyword = '', author = '', from = '', until = '9999', thread = '', limit = 12, excludeId = '' } = {},
+  ) {
+    return this.db
+      .prepare(
+        `SELECT body FROM messages WHERE g=? AND at>=? AND at<=? AND id!=?
+         AND (author!='@bot' OR id=coalesce(json_extract(body,'$.parts[0].source'),id))
+         AND (?='' OR author=? OR (author!='@bot' AND json_extract(body,'$.nickname')=?)) AND (?='' OR thread=?)
+         AND instr(lower(text),lower(?))>0 ORDER BY at DESC,rowid DESC LIMIT ?`,
       )
       .all(
         g,
         from,
         until,
+        excludeId,
+        author,
         author,
         author,
         thread,

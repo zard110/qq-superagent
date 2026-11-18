@@ -1,5 +1,6 @@
 import { auth, remote } from './network.mjs'
 import ipaddr from 'ipaddr.js'
+import { groupTime } from './messages.mjs'
 const url = (p, tool) => p.base.replace(/\/$/, '') + '/v1/tools/' + tool
 const post = (p, tool, input) =>
   remote(url(p, tool), {
@@ -7,15 +8,24 @@ const post = (p, tool, input) =>
     headers: { ...auth(p), 'content-type': 'application/json' },
     body: JSON.stringify(input),
   })
-export async function search(p, query, domain, range) {
+export async function search(p, query, domain, range, includeContent = false) {
   const days = { day: 1, week: 7, month: 30, year: 365 }[range]
   const filters =
     (domain && /^[\w.-]+$/.test(domain) ? ' site:' + domain : '') +
-    (days ? ' after:' + new Date(Date.now() - days * 86400000).toISOString().slice(0, 10) : '')
+    (days ? ' after:' + groupTime(new Date(Date.now() - days * 86400000).toISOString()).slice(0, 10) : '')
   if (filters.length >= 127) throw Error('搜索范围过长')
   const q = [...query.trim()].slice(0, 128 - filters.length).join('') + filters
-  const { results } = await post(p, 'search', { query: q, count: 5 })
-  return results.map(({ title, url, snippet, summary }) => ({ title, url, snippet: summary || snippet }))
+  const { results } = await post(p, 'search', {
+    query: q,
+    count: 5,
+    ...(includeContent ? { need_content: true } : {}),
+  })
+  return results.map(({ title, url, snippet, summary, content }) => ({
+    title,
+    url,
+    snippet: summary || snippet,
+    ...(includeContent && content ? { indexedText: content.slice(0, 18000) } : {}),
+  }))
 }
 export async function read(p, href) {
   const link = new URL(href)
