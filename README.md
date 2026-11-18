@@ -2,17 +2,63 @@
 
 独立的 QQ 群助手。它把 QQ 引用解析成带出处的文字、分享卡片和媒体句柄。群内短问答调用工具直接回复，视频分析、资料核查、做图与改图由持久化的 SuperAgent Ticket 跟进。默认管理员面板只监听本机。
 
-## Docker 启动
+## 新机器首次启动
 
-需要运行中的 Linux Docker Engine 与 Compose。产品仓库使用 Git submodule，发布镜像包含已经构建的内核。源码部署在产品仓库根目录执行：
+首次安装需要 Git、可运行 Linux 容器的 Docker Engine（Windows 可用 Docker Desktop）和支持 `additional_contexts` 的 Docker Compose。镜像构建会下载 Node、Python、系统包和 Harness 依赖。宿主机只需能运行 Git 和 Docker。迁移脚本在 Windows 使用 Git 自带的 **Git Bash**，Linux 使用 Bash。
 
 ```sh
-git submodule update --init
-docker compose up --build -d
-docker compose exec app cat /state/admin-token
+git clone --recurse-submodules git@github.com:zard110/qq-superagent.git
+cd qq-superagent
+git submodule status
+docker compose -p qq-superagent config --quiet
+docker compose -p qq-superagent up --build -d
+docker compose -p qq-superagent ps -a
+docker compose -p qq-superagent exec app cat /state/admin-token
 ```
 
-打开 http://127.0.0.1:8797 ，用上述令牌登录。也可以在启动前设置 `ADMIN_TOKEN`，此时使用设置的值。用 `PANEL_PORT` 修改宿主机端口。Compose 的应用数据卷保存配置、消息、任务、产物和令牌；备份时停止应用并备份整个卷。供应商密钥存在该卷中，面板回显及任务记录对密钥脱敏。Runner 独占 Docker socket，负责群工作区和离线媒体作业。生产环境请给该应用提供独立的 Docker 主机或守护进程。
+私有仓库需要新机器有对应的 GitHub 访问权限。若使用 HTTPS，可用 `https://github.com/zard110/qq-superagent.git` 克隆。已经克隆的仓库执行 `git submodule update --init --recursive` 即可补齐固定版本的 SuperAgent 内核。
+
+打开 [本机管理面板](http://127.0.0.1:8797/)，用上一步显示的令牌登录。Compose 正常启动后，`app`、`runner` 运行中，`browser` 显示 `healthy`；`sandbox` 和 `harness` 是供 Runner 按需使用的镜像，其初始化容器显示 `Exited (0)` 属于正常状态。服务器可通过 SSH 转发面板端口，在自己的电脑执行 `ssh -L 8797:127.0.0.1:8797 用户名@服务器`。
+
+首次使用在面板保存 QQ App ID、Client Secret 和 DeepSeek API Key。群友消息到达后，会自动识别群 OpenID。主模型、跟随主模型的子 Agent、移动浏览器、网页读图、视频抽帧与转写、群历史和 Harness 续办均已接入。生成图片需另配支持的供应商，相应平台能力和费用取决于账号。可在仓库根目录的 `.env` 覆盖 `PANEL_PORT`、`ADMIN_TOKEN` 或 `QQ_EXECUTOR`。若指定了 `ADMIN_TOKEN`，登录时直接使用该值。
+
+## 把现有机器人迁到另一台机器
+
+迁移保留两类 Docker 卷。应用卷 `qq-superagent_state` 保存 SQLite、供应商配置、QQ 凭据、管理员令牌、群历史、Ticket、投递记录和已交付的附件。每个 `qq-superagent-group-<群摘要>-work` 卷保存该群的 Harness 会话、草稿、技能和工具。下面统一使用现有部署的项目名 `qq-superagent`。如果原部署另有项目名，在两台机器的 Git Bash 或 Bash 中都先执行 `export COMPOSE_PROJECT_NAME=原项目名`，并将示例中的 `-p qq-superagent` 替换为相同项目名。
+
+### 1. 旧机器停写并备份
+
+在项目目录执行。先在面板确认正在进行的任务已结束，再停止 QQ 接入、Runner 和按需启动的群容器。备份目录选在仓库外，名称须尚未存在。
+
+```bash
+docker compose -p qq-superagent stop app runner
+docker ps -q --filter "label=qq.group.project=${COMPOSE_PROJECT_NAME:-qq-superagent}" |
+  while read -r id; do docker stop "$id" || exit 1; done
+bash scripts/migrate.sh backup ../qq-migration
+```
+
+将整个 `qq-migration` 目录通过可信渠道复制到新机器，包括 `REVISION`、`SHA256SUMS` 和全部 `.tar.gz`。这些压缩包包含密钥和群聊内容，请保存在私人位置。若部署使用了 `.env` 或宿主机环境变量，请私下复制或重新设置相同的覆盖值。切换期间保持旧机 QQ 服务停止，避免两台机器同时登录同一机器人。
+
+### 2. 新机器还原后再启动
+
+将备份放在仓库的同级目录。在一台有 Git、Docker 和 Compose 的新机器上执行以下命令。还原前保持目标卷为空；脚本会核对源码提交、卷名和 SHA-256，发现已有数据会停止。群工作区若安装了本机编译的工具，建议迁往相同 CPU 架构，跨架构时需重新安装相应工具。
+
+```bash
+git clone --recurse-submodules git@github.com:zard110/qq-superagent.git
+cd qq-superagent
+git checkout "$(cat ../qq-migration/REVISION)"
+git submodule update --init --recursive
+docker compose -p qq-superagent build
+bash scripts/migrate.sh restore ../qq-migration
+docker compose -p qq-superagent up -d
+docker compose -p qq-superagent ps -a
+```
+
+### 3. 验证和回退
+
+- 用原管理员令牌登录面板，确认 QQ 显示“已连接”，旧群、人格、任务记录和供应商设置都能看到。若使用自动生成的令牌，可在新机执行 `docker compose -p qq-superagent exec app cat /state/admin-token`。
+- 在能力测试中读取一条带图的分享页，查看实际分析的图片。再从原 QQ 群引用一条历史回复追问，确认机器人接收、检索及投递正常。定时提醒和任务恢复会随应用启动，默认使用北京时间。
+- 若需退回旧机，先在新机执行 `docker compose -p qq-superagent stop app runner` 并停止群容器，再在旧机执行 `docker compose -p qq-superagent up -d`。旧卷可恢复到切换前的状态，新机切换后的消息和变更需另行保存。保留两端的卷和备份直至验收完成。
 
 ## 群工作区与会话
 
