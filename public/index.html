@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>群间 · QQ 机器人工作台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand"><b>群间</b><span>QQ 机器人工作台</span></div>
+      <span id="connection">未连接</span>
+    </header>
+    <main>
+      <section id="login">
+        <h1>连接工作台</h1>
+        <p>输入部署时设置的管理员令牌。</p>
+        <form id="signin">
+          <label
+            >管理员令牌<input id="token" type="password" required autocomplete="current-password" /></label
+          ><button>连接</button>
+        </form>
+      </section>
+      <div id="workspace" hidden>
+        <nav id="nav"></nav>
+        <article>
+          <h1 id="title"></h1>
+          <div id="view"></div>
+        </article>
+      </div>
+      <output id="notice" role="status"></output>
+    </main>
+    <script type="module" src="/ui.js"></script>
+  </body>
+</html>

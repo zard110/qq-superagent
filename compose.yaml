@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports: ["127.0.0.1:${PANEL_PORT:-8797}:8787"]
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      RUNNER_URL: http://runner:8090
+    volumes: ["state:/state"]
+    depends_on: [runner]
+    networks: [default, workers]
+  runner:
+    build: ./runner
+    restart: unless-stopped
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    networks: [workers]
+    depends_on:
+      sandbox:
+        condition: service_completed_successfully
+  sandbox:
+    build: ./sandbox
+    image: qq-superagent-sandbox:local
+    entrypoint: ["python","-V"]
+    network_mode: none
+networks:
+  workers:
+    internal: true
+volumes:
+  state: {}
