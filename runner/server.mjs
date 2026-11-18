@@ -1,14 +1,16 @@
 import http from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { groupTurn, installDeb, recoverGroups } from './groups.mjs'
+await recoverGroups()
 let active = 0
 http
   .createServer(async (req, res) => {
-    if (req.method !== 'POST' || req.url !== '/') {
+    if (req.method !== 'POST' || !['/', '/group', '/install-deb'].includes(req.url)) {
       res.writeHead(404).end()
       return
     }
-    if (active >= 3) {
+    if (req.url === '/' && active >= 3) {
       res.writeHead(429).end()
       return
     }
@@ -24,6 +26,12 @@ http
       }
       const input = Buffer.concat(chunks)
       const payload = JSON.parse(input)
+      if (req.url !== '/') {
+        const result = req.url === '/group' ? await groupTurn(payload) : await installDeb(payload)
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify(result))
+        return
+      }
       if (!['python', 'video', 'audio'].includes(payload.op)) throw Error('未知操作')
       const proc = spawn('docker', [
         'run',
@@ -60,7 +68,9 @@ http
       try {
         await new Promise((ok, fail) => {
           proc.on('error', fail)
-          proc.on('close', (code) => (code === 0 && bytes <= 16e6 ? ok() : fail(Error('沙箱任务失败或超时'))))
+          proc.on('close', (code) =>
+            code === 0 && bytes <= 16e6 ? ok() : fail(Error('沙箱任务失败或超时')),
+          )
         })
       } finally {
         clearTimeout(kill)
@@ -68,8 +78,8 @@ http
       res.setHeader('content-type', 'application/json')
       res.end(Buffer.concat(output))
     } catch (e) {
-      res.writeHead(422).end(JSON.stringify({ error: e.message }))
-      execFile('docker', ['rm', '-f', name], () => {})
+      res.writeHead(e.status || 422).end(JSON.stringify({ error: e.message }))
+      if (req.url === '/') execFile('docker', ['rm', '-f', name], () => {})
     } finally {
       active--
     }

@@ -133,7 +133,11 @@ function render() {
         try {
           const detail = await api('run', { id: state.runs[i].id })
           const pre = document.createElement('pre')
-          pre.textContent = JSON.stringify(detail.steps, null, 2)
+          pre.textContent = JSON.stringify(
+            { executor: detail.executor, conversation: detail.route, steps: detail.steps },
+            null,
+            2,
+          )
           b.replaceWith(pre)
         } catch (e) {
           notice.textContent = e.message
@@ -293,6 +297,7 @@ function render() {
       select('skill', '能力', [
         ['chat', '主模型'],
         ['worker', '子 Agent'],
+        ['harness', 'Harness 群沙箱'],
         ['recognizeText', '文字识别（图片或 PDF）'],
         ['synthesizeSpeech', '语音合成'],
         ['editAudio', '音频剪辑（上传音频）'],
@@ -302,6 +307,9 @@ function render() {
         ['analyzeMedia', '图片或视频理解'],
       ]) +
         field('query', '问题、搜索词或网页 URL') +
+        '<div id="sessionOptions" hidden>' +
+        field('testSession', '测试会话（同名可续办，留空新建）') +
+        '</div>' +
         '<label>素材<input id="media" type="file" accept="image/*,video/*,audio/*,application/pdf"></label>' +
         '<div id="audioOptions" hidden>' +
         field('clipStart', '音频起点（秒）', '0', 'number') +
@@ -312,6 +320,7 @@ function render() {
     )
     $('#skill').onchange = () => {
       const audio = val('skill') === 'editAudio'
+      $('#sessionOptions').hidden = val('skill') !== 'harness'
       $('#audioOptions').hidden = !audio
       $('#query').parentElement.hidden = audio
     }
@@ -324,7 +333,7 @@ function render() {
           q = val('query'),
           name = val('skill')
         let file
-        if (f && ['analyzeMedia', 'recognizeText', 'editAudio'].includes(name)) {
+        if (f && ['analyzeMedia', 'recognizeText', 'editAudio', 'harness'].includes(name)) {
           if (f.size > 32 * 1024 * 1024) throw Error('素材超过 32 MiB')
           file = {
             mime: f.type,
@@ -339,6 +348,7 @@ function render() {
         const result = await api('test', {
           name,
           question: q,
+          ...(name === 'harness' ? { session: val('testSession').trim() } : {}),
           args: {
             question: q,
             text: q,
@@ -353,6 +363,7 @@ function render() {
           },
           file,
         })
+        if (name === 'harness' && result.session) $('#testSession').value = result.session
         const wav = result.audio
         delete result.audio
         $('#output').textContent = JSON.stringify(result, null, 2)

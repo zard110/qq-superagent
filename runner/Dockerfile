@@ -3,4 +3,5 @@ ENV TZ=Asia/Shanghai
 COPY --from=node:24-bookworm-slim /usr/share/zoneinfo/Asia/Shanghai /usr/share/zoneinfo/Asia/Shanghai
 RUN apk add --no-cache nodejs
 COPY server.mjs /server.mjs
+COPY groups.mjs /groups.mjs
 ENTRYPOINT ["node","/server.mjs"]

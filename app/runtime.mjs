@@ -11,6 +11,8 @@ import {
 } from './articles.mjs'
 import { chat, provider } from './network.mjs'
 import { audioClipRequest } from './sandbox-tools.mjs'
+import { decideConversation } from './conversation.mjs'
+import { executeHarness } from './harness.mjs'
 
 const delegate = {
   type: 'function',
@@ -130,6 +132,16 @@ export class Runtime {
         )
         if (source) m.refs.push(source.id)
       }
+      const pendingKey = key(m.group, m.author)
+      const waiting = this.store.get('awaitReply', pendingKey)
+      const expected =
+        waiting &&
+        Date.parse(m.at) <= waiting.until &&
+        !m.refs.length &&
+        /^(?:\d+[：:.\d秒分]*|是|好|可以|第[一二三两]|前者|后者|视频|音乐|图片)[呀啊呢吧。！!?？\s]*$/u.test(
+          m.text.trim(),
+        )
+      if (expected) m.refs.push(waiting.source)
       const act = route(this.store, m, config)
       this.store.message(m)
       if (m.mention && /领取|取回|查看结果/.test(m.text)) {
@@ -156,9 +168,16 @@ export class Runtime {
         if (held.length) return m
       }
       if (act) {
+        if (expected || m.refs.includes(waiting?.source)) this.store.del('awaitReply', pendingKey)
         const social = !m.mention && groupPolicy(config, m.group).mode === 'social' && !m.refs.length
         if (social) this.store.put('lastSpeech', m.group, Date.now())
-        this.store.put('run', key(m.group, m.id), { id: key(m.group, m.id), m, state: 'queued', social })
+        this.store.put('run', key(m.group, m.id), {
+          id: key(m.group, m.id),
+          m,
+          state: 'queued',
+          social,
+          executor: process.env.QQ_EXECUTOR === 'harness' ? 'harness' : 'legacy',
+        })
       }
       return m
     })
@@ -208,9 +227,12 @@ export class Runtime {
   async tick() {
     const runs = this.store.pendingRuns()
     const threads = new Set()
+    const senders = new Set()
     for (const run of runs) {
-      if (!['queued', 'running'].includes(run.state) || threads.has(run.m.thread)) continue
+      const sender = key(run.m.group, run.m.author)
+      if (threads.has(run.m.thread) || senders.has(sender)) continue
       threads.add(run.m.thread)
+      senders.add(sender)
       if (this.busy.has(run.id) || run.after > Date.now() || this.busy.size >= 3) continue
       this.busy.add(run.id)
       void this.process(run).finally(() => this.busy.delete(run.id))
@@ -272,10 +294,50 @@ export class Runtime {
         this.finish(run, rosterReply(info, data))
         return
       }
+      let useHarness = run.executor === 'harness'
+      if (useHarness && !run.route) {
+        run.route = await decideConversation(this, run)
+        if (run.route.productTool) {
+          run.executor = 'capability'
+          useHarness = false
+        }
+        m.thread = run.route.thread
+        if (!m.refs.length && run.route.source) m.refs.push(run.route.source)
+        s.atomic(() => {
+          s.db
+            .prepare('UPDATE messages SET thread=?,body=? WHERE g=? AND id=?')
+            .run(m.thread, JSON.stringify(m), m.group, m.id)
+          s.put('run', id, run)
+        })
+      }
+      if (run.route?.action === 'clarify') {
+        this.finish(run, run.route.question)
+        return
+      }
       const ref = this.caps.reference(m)
+      if (useHarness && (run.ticket || ['new', 'continue'].includes(run.route.action))) {
+        if (!run.ticket) this.ticket(run)
+        const previous = s.db
+          .prepare(
+            "SELECT body FROM records WHERE bucket='run' AND id!=? AND json_extract(body,'$.ticket')=? ORDER BY rowid LIMIT 1",
+          )
+          .get(id, run.ticket)
+        if (previous && JSON.parse(previous.body).executor !== 'harness') {
+          run.executor = 'legacy'
+          s.put('run', id, run)
+          return
+        }
+        const saved = s.get('harnessResult', id)
+        const result = saved || (await executeHarness(this, run, ref))
+        if (!saved) s.put('harnessResult', id, result)
+        this.finish(run, replyMentions(result.text || '已完成。', m, s), result.artifact)
+        return
+      }
       if (
+        !useHarness &&
         !run.ticket &&
-        (heavy.test(m.text) ||
+        (run.route?.productTool === 'generateImage' ||
+          heavy.test(m.text) ||
           ref.parts.some((p) => p.mime?.startsWith('video/')) ||
           s.all('run').some((r) => r.ticket && r.m.thread === m.thread && r.id !== id))
       )
@@ -337,7 +399,7 @@ export class Runtime {
         (v) =>
           v.type === 'card' && v.url && /music\.163\.com|y\.qq\.com|音乐/.test(v.url + ' ' + v.site),
       )
-      if (clip && (audio.length === 1 || (audio.length === 0 && songs.length === 1))) {
+      if (!useHarness && clip && (audio.length === 1 || (audio.length === 0 && songs.length === 1))) {
         const call = async (name, args) => {
           if (!specs.some((t) => t.function.name === name)) throw Error('本群未启用 ' + name)
           const stepId = key(id, 'audio', name, args),
@@ -671,6 +733,8 @@ export class Runtime {
           summary: text.slice(0, 1400),
         })
       const out = key(run.id, 'reply')
+      if (run.executor === 'harness' && /[?？]\s*$/.test(text))
+        s.put('awaitReply', key(m.group, m.author), { source: out, until: Date.now() + 1800000 })
       if (text) this.enqueue(out, m.group, m.id, text, undefined)
       if (artifact) this.enqueue(key(out, 'media'), m.group, m.id, '', artifact)
       const parts = [{ type: 'text', text, source: out }]

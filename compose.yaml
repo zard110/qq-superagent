@@ -7,6 +7,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RUNNER_URL: http://runner:8090
       BROWSER_URL: http://browser:8091
+      QQ_EXECUTOR: ${QQ_EXECUTOR:-legacy}
     volumes: ["state:/state"]
     depends_on:
       runner:
@@ -16,11 +17,15 @@ services:
     networks: [default, workers]
   runner:
     build: ./runner
+    environment:
+      GROUP_PROJECT: ${COMPOSE_PROJECT_NAME}
     restart: unless-stopped
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
     networks: [workers]
     depends_on:
       sandbox:
+        condition: service_completed_successfully
+      harness:
         condition: service_completed_successfully
   browser:
     build:
@@ -42,6 +47,15 @@ services:
     build: ./sandbox
     image: qq-superagent-sandbox:local
     entrypoint: ["python","-V"]
+    network_mode: none
+  harness:
+    build:
+      context: ./harness
+      args: { SANDBOX_BASE: sandbox-base }
+      additional_contexts:
+        sandbox-base: service:sandbox
+    image: qq-superagent-harness:local
+    entrypoint: ["node","--version"]
     network_mode: none
 networks:
   workers:

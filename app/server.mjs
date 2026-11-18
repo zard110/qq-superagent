@@ -7,6 +7,7 @@ import { Store, persona } from './store.mjs'
 import { Capabilities } from './capabilities.mjs'
 import { Runtime } from './runtime.mjs'
 import { QQ } from './qq.mjs'
+import { startGateway, executeHarness } from './harness.mjs'
 import { key } from './messages.mjs'
 import { publicShareLink } from './articles.mjs'
 import { settings, selectedProvider } from './providers.mjs'
@@ -22,6 +23,7 @@ const store = new Store(join(dir, 'bot.sqlite')),
   app = new Runtime(store, caps),
   qq = new QQ(app)
 qq.enabled = true
+if (process.env.RUNNER_URL) startGateway()
 if (store.config().qq.appId) {
   for (const { g } of store.db.prepare('SELECT DISTINCT g FROM messages').all()) qq.warmDirectory(g)
 }
@@ -145,6 +147,8 @@ const server = http.createServer(async (req, res) => {
       if (!run) throw Error('找不到任务')
       return json({
         state: run.state,
+        executor: run.executor || 'legacy',
+        route: run.route,
         ticket: run.ticket,
         steps: store
           .all('step')
@@ -177,6 +181,28 @@ const server = http.createServer(async (req, res) => {
           text: body.question || '请分析素材',
         }
       const args = { ...body.args }
+      if (body.name === 'harness') {
+        const run = {
+          id: key('test', id),
+          ticket: key('@test', body.session || id),
+          m: { ...m, thread: key('@test', body.session || id) },
+          route: {
+            requiresFile: typeof body.requiresFile === 'boolean' ? body.requiresFile : undefined,
+          },
+        }
+        if (body.file) {
+          const resource = caps.save(group, body.file.mime, Buffer.from(body.file.data, 'base64'))
+          m.parts.push({ type: 'media', mime: body.file.mime, resource, source: id })
+        }
+        const result = await executeHarness(app, run, caps.reference(run.m))
+        return json({
+          status: 'ok',
+          session: body.session || id,
+          answer: result.text,
+          artifact: result.artifact,
+          execution: store.get('step', key(run.id, 'harness'))?.result,
+        })
+      }
       if (body.file) {
         if (
           !/^(image|video)\//.test(body.file.mime) &&

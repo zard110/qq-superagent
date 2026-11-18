@@ -1,0 +1,24 @@
+#!/usr/local/bin/node
+const [op, ...args] = process.argv.slice(2)
+if (!['install-deb', 'searchWeb', 'readWebPage'].includes(op) || !args.length) {
+  console.error(
+    'qq-tool install-deb PACKAGE... | searchWeb QUERY | readWebPage URL',
+  )
+  process.exit(2)
+}
+const lease = process
+  .getBuiltinModule('fs')
+  .readFileSync('/tmp/qq-task-lease', 'utf8')
+fetch('http://app:8790/task/' + op, {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    authorization: 'Bearer ' + lease,
+  },
+  body: JSON.stringify({ args }),
+})
+  .then(async (r) => {
+    console.log(await r.text())
+    if (!r.ok) process.exitCode = 1
+  })
+  .catch(() => (process.exitCode = 1))
