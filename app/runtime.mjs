@@ -154,7 +154,9 @@ export class Runtime {
           m.text.trim(),
         )
       if (expected) m.refs.push(waiting.source)
-      const act = route(this.store, m, config)
+      const act =
+        route(this.store, m, config) ||
+        (implicitSummary && !!m.inferredRef && groupPolicy(config, m.group).mode === 'social')
       this.store.message(m)
       if (m.mention && /领取|取回|查看结果/.test(m.text)) {
         const held = this.store

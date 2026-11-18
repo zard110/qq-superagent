@@ -111,6 +111,16 @@ test('未引用的上一条小红书：只关联本群，保留原分享参数�
   }
   r.receive('GROUP_MESSAGE_CREATE', card)
   r.receive('GROUP_MESSAGE_CREATE', { ...card, group_openid: 'other', id: 'unrelated' })
+  s.put('config', 'main', { ...s.config(), groups: { g: { mode: 'social' } } })
+  s.put('lastSpeech', 'g', Date.now())
+  const followup = r.receive('GROUP_MESSAGE_CREATE', {
+    id: 'summary',
+    group_openid: 'g',
+    author: { id: 'a' },
+    content: '说了啥？',
+  })
+  assert.deepEqual(followup.refs, ['card'])
+  assert.equal(s.get('run', key('g', 'summary')).state, 'queued')
   const m = r.receive('GROUP_AT_MESSAGE_CREATE', {
     id: 'q',
     group_openid: 'g',
