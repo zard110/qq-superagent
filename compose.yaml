@@ -7,7 +7,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RUNNER_URL: http://runner:8090
       BROWSER_URL: http://browser:8091
-      QQ_EXECUTOR: ${QQ_EXECUTOR:-legacy}
+      QQ_EXECUTOR: ${QQ_EXECUTOR:-harness}
     volumes: ["state:/state"]
     depends_on:
       runner:
