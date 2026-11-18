@@ -43,6 +43,13 @@ test('引用旧作品时保留版本，独立请求分叉，候选按群隔离',
   const follow = await decideConversation(runtime, next)
   assert.equal(follow.thread, 'thread1')
   assert.equal(follow.session, 'ticket1')
+  s.message({ ...parent, id: 'card', idx: 'card', thread: 'card-thread', author: 'a1' })
+  const edited = await decideConversation(runtime, {
+    ...next,
+    m: { ...next.m, author: 'a1', refs: ['card'], inferredRef: 'card' },
+  })
+  assert.equal(edited.action, 'continue')
+  assert.equal(edited.source, key('old', 'reply'))
   action = 'chat'
   assert.equal((await decideConversation(runtime, next)).thread, 'thread1')
   s.del('run', 'old')

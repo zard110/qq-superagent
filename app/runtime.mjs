@@ -130,7 +130,10 @@ export class Runtime {
                       : true),
             ),
         )
-        if (source) m.refs.push(source.id)
+        if (source) {
+          m.inferredRef = source.id
+          m.refs.push(source.id)
+        }
       }
       const pendingKey = key(m.group, m.author)
       const waiting = this.store.get('awaitReply', pendingKey)
@@ -324,7 +327,9 @@ export class Runtime {
           useHarness = false
         }
         m.thread = run.route.thread
-        if (!m.refs.length && run.route.source) m.refs.push(run.route.source)
+        if (run.route.source && m.inferredRef && m.refs.every((ref) => ref === m.inferredRef))
+          m.refs = [run.route.source]
+        else if (!m.refs.length && run.route.source) m.refs.push(run.route.source)
         s.atomic(() => {
           s.db
             .prepare('UPDATE messages SET thread=?,body=? WHERE g=? AND id=?')

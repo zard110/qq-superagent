@@ -5,6 +5,7 @@ export async function decideConversation(runtime, run) {
     { m } = run,
     config = store.config()
   const parents = m.refs.map((id) => store.lookup(m.group, id)).filter(Boolean)
+  const explicit = parents.filter((p) => p.id !== m.inferredRef)
   const recent = store.db
     .prepare(
       "SELECT body FROM records WHERE bucket='run' AND id!=? AND json_extract(body,'$.m.group')=? AND json_extract(body,'$.m.at')<=? ORDER BY rowid DESC LIMIT 12",
@@ -27,6 +28,7 @@ export async function decideConversation(runtime, run) {
   const options = [...candidates.values()].slice(0, 8)
   const object = [m, ...parents].map((p) => ({
     who: p.author,
+    inferred: p.id === m.inferredRef,
     thread: p.thread,
     parts: p.parts.map((v) => ({ type: v.type, title: v.title, mime: v.mime })),
     text: p.text.replace(/https?:\/\/\S+/g, '[链接]').slice(0, 250),
@@ -80,9 +82,9 @@ export async function decideConversation(runtime, run) {
       parents.length === 1 || m.parts.some((p) => ['media', 'card'].includes(p.type)) ? 'new' : 'clarify'
   if (
     c &&
-    parents.length &&
+    explicit.length &&
     d.action === 'continue' &&
-    !parents.some(
+    !explicit.some(
       (p) =>
         p.thread === c.m.thread ||
         options.some((r) => r.m.thread === p.thread && r.route?.action === 'clarify'),
@@ -91,7 +93,7 @@ export async function decideConversation(runtime, run) {
     d.action = 'clarify'
     d.question = '你是要接着处理引用的内容，还是要继续另一项任务？'
   }
-  if (d.action === 'continue' && c && !parents.length && c.m.author !== m.author) {
+  if (d.action === 'continue' && c && !explicit.length && c.m.author !== m.author) {
     d.action = 'clarify'
     d.question = '你想继续哪位群友的任务？请引用对应的消息或作品。'
   }
@@ -107,7 +109,16 @@ export async function decideConversation(runtime, run) {
       session = prior.route?.session || prior.ticket
     }
   }
-  const source = parents[0]?.id || (c?.artifact ? key(c.id, 'reply') : c?.m.id)
+  let work = c
+  if (c && !c.artifact && !explicit.length && ['continue', 'new'].includes(d.action)) {
+    const prior = store.db
+      .prepare(
+        "SELECT body FROM records WHERE bucket='run' AND json_extract(body,'$.m.group')=? AND json_extract(body,'$.m.thread')=? AND json_extract(body,'$.artifact') IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(m.group, c.m.thread)
+    if (prior) work = JSON.parse(prior.body)
+  }
+  const source = explicit[0]?.id || (work?.artifact ? key(work.id, 'reply') : c?.m.id) || parents[0]?.id
   return {
     action: d.action,
     answersWaiting: d.answersWaiting === true,
