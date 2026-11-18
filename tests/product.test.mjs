@@ -11,7 +11,7 @@ import { Runtime } from '../app/runtime.mjs'
 import { QQ } from '../app/qq.mjs'
 import { publicFile } from '../app/network.mjs'
 
-const at = '2026-11-18T05:00:00Z',
+const at = '2020-01-01T05:00:00Z',
   mention = 'GROUP_AT_MESSAGE_CREATE',
   all = 'GROUP_MESSAGE_CREATE'
 function event(id, group, text, author = 'a', extra = {}) {

@@ -334,7 +334,7 @@ export class Runtime {
       m = run.m
     s.atomic(() => {
       if (run.ticket)
-        this.engine.report(run.ticket, { state: failed ? 'failed' : 'waiting', summary: text.slice(0, 1400) })
+        this.engine.report(run.ticket, { state: failed ? 'failed' : 'ready', summary: text.slice(0, 1400) })
       const out = key(run.id, 'reply')
       if (text) this.enqueue(out, m.group, m.id, text, undefined)
       if (artifact) this.enqueue(key(out, 'media'), m.group, m.id, '', artifact)
