@@ -119,6 +119,24 @@ function render() {
           (state.runs.length ? '' : '<p>等待群消息</p>'),
       ) +
       card(
+        '每日群记忆',
+        state.memories
+          .map((m) =>
+            item(
+              m.group,
+              [
+                m.day || '等待北京时间 01:00',
+                m.status,
+                m.count != null ? m.count + ' 条消息' : '',
+                m.error,
+              ]
+                .filter(Boolean)
+                .join(' · '),
+            ),
+          )
+          .join('') || '<p>等待群历史</p>',
+      ) +
+      card(
         '投递记录',
         state.deliveries
           .map((o) => item(o.text || '媒体文件', o.group + ' · ' + o.status + ' ' + (o.detail || '')))
@@ -228,6 +246,7 @@ function render() {
     })
     const switches = {
       getGroupInfo: '查询本群资料与成员',
+      searchHistory: '检索群历史和每日记忆',
       recognizeText: '文字识别',
       synthesizeSpeech: '语音合成',
       searchWeb: '公开网页搜索',

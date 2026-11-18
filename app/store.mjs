@@ -12,7 +12,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_ref ON messages(g,idx);
       CREATE TABLE IF NOT EXISTS group_members(g TEXT, id TEXT, name TEXT, role TEXT, bot INTEGER, at TEXT, username TEXT, PRIMARY KEY(g,id));
       CREATE INDEX IF NOT EXISTS member_name ON group_members(g,name);
-      CREATE INDEX IF NOT EXISTS history ON messages(g,at);`)
+      CREATE INDEX IF NOT EXISTS history ON messages(g,at);
+      CREATE TABLE IF NOT EXISTS daily_memory(g TEXT NOT NULL, day TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY(g,day));`)
     this.depth = 0
     if (!this.get('migration', 'group-members-1'))
       this.atomic(() => {

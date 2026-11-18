@@ -7,9 +7,19 @@ async function main() {
     execFileSync(process.execPath, ['/opt/harness/install_skill.mjs', args[0]], { stdio: 'inherit' })
     return
   }
-  if (!['install-deb', 'searchWeb', 'readWebPage', 'fetchImage'].includes(op) || !args.length)
+  if (
+    ![
+      'install-deb',
+      'searchWeb',
+      'readWebPage',
+      'fetchImage',
+      'searchGroupMemory',
+      'searchHistory',
+    ].includes(op) ||
+    !args.length
+  )
     throw Error(
-      'qq-tool install-deb PACKAGE | searchWeb QUERY | readWebPage URL | fetchImage POST_URL IMAGE_HANDLE_OR_MEDIA_URL',
+      'qq-tool install-deb PACKAGE | searchWeb QUERY | readWebPage URL | searchGroupMemory JSON | searchHistory JSON | fetchImage POST_URL IMAGE_HANDLE_OR_MEDIA_URL',
     )
   const token = fs.readFileSync('/tmp/qq-task-lease', 'utf8')
   const response = await fetch('http://app:8790/task/' + op, {

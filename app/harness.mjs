@@ -1,3 +1,4 @@
+import { recentMemory } from './memory.mjs'
 import http from 'node:http'
 import { instagramPost, isPostPhoto } from './photo-sources.mjs'
 import net from 'node:net'
@@ -119,6 +120,10 @@ export function startGateway(runtime, port = 8790) {
         })
         result = await r.json()
         if (!r.ok) throw Error(result.error || '安装失败')
+      } else if (['searchGroupMemory', 'searchHistory'].includes(op)) {
+        const args = JSON.parse(data.args[0] || '{}')
+        const config = g.caps.store.config()
+        result = await g.caps.run(op, args, { ...g.ctx, config })
       } else if (['searchWeb', 'readWebPage'].includes(op)) {
         result = await g.caps.run(
           op,
@@ -281,6 +286,7 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
     inputs,
     question: publicShareText(m.text),
     persona: config.groups[m.group]?.persona || config.persona,
+    groupMemory: recentMemory(store, m) || undefined,
     sender: { name: m.nickname || store.member(m.group, m.author)?.name, role: m.role },
     mentions: (m.mentions || []).map((u) => ({ name: u.name, bot: u.self || u.bot })),
     references: ref.parts
@@ -304,11 +310,7 @@ export async function executeHarness(runtime, run, ref) {
   const { store, caps } = runtime,
     m = run.m,
     config = store.config()
-  if (
-    run.social ||
-    config.groups[m.group]?.code === false ||
-    config.groups[m.group]?.disabled?.includes('runCode')
-  )
+  if (config.groups[m.group]?.code === false || config.groups[m.group]?.disabled?.includes('runCode'))
     throw Error('本群未开启通用任务执行')
   const saved = store.get('harnessResult', run.id)
   if (saved) return saved

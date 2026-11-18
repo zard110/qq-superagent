@@ -1,3 +1,4 @@
+import { MemoryArchive } from './memory.mjs'
 import http from 'node:http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join, resolve, extname } from 'node:path'
@@ -21,6 +22,7 @@ const token = process.env.ADMIN_TOKEN || readFileSync(tokenFile, 'utf8').trim()
 const store = new Store(join(dir, 'bot.sqlite')),
   caps = new Capabilities(store, join(dir, 'assets')),
   app = new Runtime(store, caps),
+  archive = new MemoryArchive(store, join(dir, 'memory')),
   qq = new QQ(app)
 qq.enabled = true
 if (process.env.RUNNER_URL) startGateway(app)
@@ -136,6 +138,16 @@ const server = http.createServer(async (req, res) => {
           })),
         deliveries: store.all('out').slice(0, 50),
         schedules: store.all('schedule'),
+        memories: store
+          .all('memoryJob')
+          .map(({ group, day, next, count, status, error }) => ({
+            group,
+            day,
+            next,
+            count,
+            status,
+            error,
+          })),
       })
     if (req.method !== 'POST') {
       res.writeHead(404).end()
@@ -334,6 +346,9 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ detail: e.message }))
   }
 })
+const archiveTick = () => void archive.tick().catch((e) => console.error('群记忆调度失败', e.message))
+archiveTick()
+const archiveTimer = setInterval(archiveTick, 15000)
 const interval = setInterval(() => {
   schedules()
   void app.tick()
@@ -352,6 +367,7 @@ server.listen(Number(process.env.PORT || 8787), process.env.HOST || '127.0.0.1',
 )
 function stop() {
   clearInterval(interval)
+  clearInterval(archiveTimer)
   qq.enabled = false
   qq.socket?.close()
   server.close()

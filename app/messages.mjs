@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-export const key = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)
+export const key = (...parts) =>
+  createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)
 const clean = (v) => (typeof v === 'string' ? v.slice(0, 16000) : '')
 export function groupTime(iso) {
   return iso && new Date(Date.parse(iso) + 8 * 3600000).toISOString().replace('Z', '+08:00')
@@ -32,18 +33,22 @@ export function normalize(type, d) {
     refs = new Set(),
     group = d.group_openid
   if (meta.ref_msg_idx) refs.add(meta.ref_msg_idx)
-  function walk(e, depth = 0) {
+  function walk(e, depth = 0, quoted) {
     if (depth > 12 || parts.length >= 120) return
-    const source = clean(e.msg_idx || d.id),
+    if (e.message_type === 103 && e.msg_idx) quoted = clean(e.msg_idx)
+    const origin = quoted ? { quote: quoted } : {}
+    const source = clean(e.msg_idx || quoted || d.id),
       text = clean(e.content)
-    if (text) parts.push({ type: 'text', text, source })
+    if (text) parts.push({ type: 'text', text, source, ...origin })
     if (e.message_type === 103 && e.msg_idx) refs.add(e.msg_idx)
     for (const a of (e.attachments || []).slice(0, 12))
-      if (a.url) parts.push({ type: 'media', mime: clean(a.content_type), url: clean(a.url), source })
+      if (a.url)
+        parts.push({ type: 'media', mime: clean(a.content_type), url: clean(a.url), source, ...origin })
     if (e.ark_data) {
       const f = e.ark_data.fields || {}
       parts.push({
         type: 'card',
+        ...origin,
         title: clean(f.title),
         site: clean(f.source || f.tag),
         preview: clean(f.preview),
@@ -52,7 +57,7 @@ export function normalize(type, d) {
         source,
       })
     }
-    for (const child of e.msg_elements || []) walk(child, depth + 1)
+    for (const child of e.msg_elements || []) walk(child, depth + 1, quoted)
   }
   walk(d)
   const mentions = (d.mentions || []).map((user) => ({
@@ -133,7 +138,7 @@ export function resolve(store, m) {
     seen.add(ref)
     const original = store.lookup(m.group, ref)
     if (!original) {
-      if (!m.parts.some((p) => p.source === ref)) missing.push(ref)
+      if (!m.parts.some((p) => p.source === ref || p.quote === ref)) missing.push(ref)
       return
     }
     parts.push(...original.parts)
@@ -158,7 +163,9 @@ export function resolve(store, m) {
     return { ...p, site: p.site || site, url: p.url || url || '', preview: p.preview || preview }
   })
   return {
-    parts: enriched.filter((p, i, a) => a.findIndex((o) => JSON.stringify(o) === JSON.stringify(p)) === i),
+    parts: enriched.filter(
+      (p, i, a) => a.findIndex((o) => JSON.stringify(o) === JSON.stringify(p)) === i,
+    ),
     missing,
   }
 }
@@ -178,10 +185,7 @@ export function route(store, m, config) {
   if (m.mention) return true
   if (policy.mode === 'rules') return policy.rules.some((x) => x && m.text.includes(x))
   if (parent?.author === '@bot' || (policy.nickname && m.text.includes(policy.nickname))) return true
-  if (policy.mode === 'social') {
-    const last = store.get('lastSpeech', m.group) || 0
-    return Date.now() - last > 1000 * policy.cooldown && !!m.text.trim()
-  }
+  if (policy.mode === 'social') return !!m.text.trim()
   if (/(谁(能|知道)|请问.{1,50}[？?]|有人(知道|能帮)|帮忙查一下)/.test(m.text)) return true
   return (
     continuation &&

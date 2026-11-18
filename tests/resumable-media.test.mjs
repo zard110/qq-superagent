@@ -91,6 +91,14 @@ test('超过 36 次调用，停滞后用相同会话和凭证恢复一次，已�
   })
   store.put('config', 'main', { ...store.config(), providers: { worker: { model: 'test', base } } })
   const m = { id: 'q', group: 'g', author: 'a', text: '继续原稿', parts: [], refs: [], thread: 'thread' }
+  m.at = '2026-11-19T08:00:00+08:00'
+  const entry = (group) =>
+    JSON.stringify([
+      { kind: '决定', topic: '方案', text: group + ' 的草稿', sources: [{ id: 'q', at: m.at }] },
+    ])
+  const insert = store.db.prepare('INSERT INTO daily_memory VALUES(?,?,?)')
+  insert.run('g', '2026-11-18', entry('本群'))
+  insert.run('other', '2026-11-18', entry('别群'))
   const run = { id: key('run'), m, ticket: 'ticket', route: { goal: 'document' }, state: 'running' }
   const tick = () => executeHarness(runtime, run, { parts: [] })
   await assert.rejects(tick, Pending)
@@ -115,6 +123,10 @@ test('超过 36 次调用，停滞后用相同会话和凭证恢复一次，已�
   await assert.rejects(tick, Pending)
   assert.equal(submissions.length, 2)
   assert.equal(submissions[1].recovering, true)
+  for (const job of submissions) {
+    assert.match(job.groupMemory, /本群/)
+    assert.doesNotMatch(job.groupMemory, /别群/)
+  }
   assert.equal(submissions[1].ticket, submissions[0].ticket)
   assert.equal(submissions[1].token, submissions[0].token)
   state = {

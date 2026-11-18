@@ -7,6 +7,7 @@ import { packageWheels, musicSource, artifactTypes } from './sandbox-tools.mjs'
 import { settings, selectedProvider } from './providers.mjs'
 import * as deepseek from './deepseek.mjs'
 import { publicShareLink, publicShareText } from './articles.mjs'
+import { searchMemory } from './memory.mjs'
 const str = { type: 'string' }
 const definitions = {
   recognizeText: ['提取图片或 PDF 中的原文，按页返回', { resource: str }],
@@ -15,11 +16,16 @@ const definitions = {
     { text: str, voice: { type: 'string', enum: ['stella', 'tide'] } },
   ],
   resolveReference: ['读取当前消息引用的文本、卡片与媒体句柄', {}],
+  searchGroupMemory: [
+    '按话题关键词、北京时间起止日期检索本群每日记忆，附原话片段。',
+    { keyword: str, from: str, until: str },
+  ],
   searchHistory: [
     '检索本群留存消息。可按关键词、成员 ID 或群昵称、起止日期或 ISO 时间筛选。默认北京时间。另返回本群留存的群友消息总数、发言人数和起止时间。',
     {
       keyword: str,
       author: str,
+      messageId: str,
       from: str,
       until: str,
       limit: { type: 'integer', minimum: 1, maximum: 40 },
@@ -106,6 +112,7 @@ const expected = {
   downloadResource: '公开资源',
   resolveReference: 'QQ',
   searchHistory: 'SQLite',
+  searchGroupMemory: 'SQLite',
 }
 export class Pending extends Error {}
 export class Capabilities {
@@ -123,6 +130,7 @@ export class Capabilities {
         output: {
           resolveReference: '引用片段与缺失索引',
           searchHistory: '带来源与时间的消息列表',
+          searchGroupMemory: '按日整理的本群条目与原消息出处',
           readWebPage: '正文或受限原因',
           searchWeb: '候选来源列表',
           analyzeMedia: '发现与读取范围',
@@ -372,7 +380,58 @@ export class Capabilities {
         [a.resource],
       )
     }
+    if (name === 'searchGroupMemory') {
+      const rows = searchMemory(this.store, m.group, a)
+      const data = rows.map((row) => ({
+        ...row,
+        laterMentions: this.store
+          .history(m.group, {
+            keyword: a.keyword?.trim() || row.topic,
+            from: new Date(Date.parse(historyBound(row.day, true)) + 1).toISOString(),
+            until: new Date(m.at || Date.now()).toISOString(),
+            excludeId: m.id,
+            limit: 3,
+          })
+          .map((v) => ({
+            id: v.id,
+            at: groupTime(v.at),
+            author: v.nickname || v.author,
+            text: publicShareText(v.text).slice(0, 800),
+          })),
+        quotes: row.sources
+          .slice(0, 3)
+          .map((source) => {
+            const v = this.store.lookup(m.group, source.id)
+            return (
+              v && {
+                ...source,
+                author: v.nickname || v.author,
+                text: publicShareText(v.text).slice(0, 800),
+              }
+            )
+          })
+          .filter(Boolean),
+      }))
+      return result(data, [...new Set(rows.flatMap((v) => v.sources.map((s) => s.id)))])
+    }
     if (name === 'searchHistory') {
+      if (a.messageId) {
+        const v = this.store.lookup(m.group, a.messageId)
+        return result(
+          v
+            ? [
+                {
+                  id: v.id,
+                  at: groupTime(v.at),
+                  author: v.nickname || v.author,
+                  text: publicShareText(v.text),
+                  parts: this.reference(v).parts.slice(0, 12),
+                },
+              ]
+            : [],
+          v ? [v.id] : [],
+        )
+      }
       const rows = this.store.history(m.group, {
         ...a,
         excludeId: m.id,
