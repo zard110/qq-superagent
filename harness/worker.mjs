@@ -136,6 +136,9 @@ async function turn(job) {
       skillsDirectory: directory,
       otherGroupSkills: directory === installed ? undefined : installed,
       productionMode: job.productionMode,
+      progress: job.progressReports
+        ? '长任务每完成一个有意义的阶段，运行 qq-tool progress 稳定英文阶段编号 "已完成的具体工作" "接下来做什么" 向主任务汇报。由主任务通知群友。用简短中文与真实工具回执；相同阶段重试沿用编号，将同批素材合并。成片交付走最终输出。'
+        : undefined,
       request: job.question,
       persona: job.persona,
       sender: job.sender,
@@ -177,10 +180,10 @@ async function turn(job) {
         first=await session.run(request,notifications)
         if(!first.finishReason || ['completed','stop'].includes(first.finishReason)) return first
       } catch(error) {
-        if(!job.flow || !/disconnect|stream error|ECONNRESET|socket|timed?\s*out|timeout/i.test(error.message)) throw error
+        if(!job.flow || !/disconnect|stream error|fetch failed|ECONNRESET|socket|timed?\s*out|timeout/i.test(error.message)) throw error
         first={finishReason:'error',events:[],finalResponse:error.message}
       }
-      if(!job.flow || !/disconnect|stream error|ECONNRESET|socket|timed?\s*out|timeout/i.test(JSON.stringify([first.finalResponse,first.events.filter(e=>e.type==='assistant/attempt').at(-1)?.data]))) return first
+      if(!job.flow || !/disconnect|stream error|fetch failed|ECONNRESET|socket|timed?\s*out|timeout/i.test(JSON.stringify([first.finalResponse,first.events.filter(e=>e.type==='assistant/attempt').at(-1)?.data]))) return first
       try {await writeFile(join(dir,'.retry-'+job.run+'-'+stage),'1',{flag:'wx'})}
       catch(e){if(e.code==='EEXIST')return first;throw e}
       const response=await fetch(gateway+'/recover',{method:'POST',headers:{authorization:'Bearer '+job.token,'content-type':'application/json'},body:JSON.stringify({args:[]}),signal:AbortSignal.timeout(5000)})

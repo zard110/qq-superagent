@@ -422,8 +422,17 @@ export class QQ {
       const o = s.nextDelivery()
       if (!o) return
       const origin = o.origin && s.lookup(o.group, o.origin)
-      const passive = origin && Date.now() - Date.parse(origin.at) < 295000
+      let passive = origin && Date.now() - Date.parse(origin.at) < 295000
       try {
+        if (o.progressRun) {
+          const run = s.get('run', o.progressRun)
+          // Keep passive reply slots for the final text and attachment.
+          if (passive && !o.seq && s.nextSequence(o.group, o.origin) > 3) passive = false
+          if (run?.state !== 'running' || (!passive && (o.seq || !groupPolicy(s.config(), o.group).active))) {
+            o.status = 'superseded'
+            return
+          }
+        }
         if (!passive && !groupPolicy(s.config(), o.group).active) {
           o.status = 'held'
           return
@@ -464,7 +473,12 @@ export class QQ {
         o.status = 'sent'
         o.remote = reply.id
         s.put('out', o.id, o)
-        if (reply.id && origin) {
+        if (reply.id && o.progressRun) {
+          const run = s.get('run', o.progressRun)
+          s.message({group:o.group, id:reply.id, idx:reply.message_scene?.ext?.find(x => x.startsWith('msg_idx='))?.slice(8) || reply.id,
+            author:'@bot', nickname:'机器人', at:new Date().toISOString(), thread:run.m.thread,
+            text:o.text, parts:[{type:'text', text:o.text, source:reply.id}], refs:[], mentions:[]})
+        } else if (reply.id && origin) {
           const bot = s.lookup(
             o.group,
             o.replyId || key(key(o.group, o.sourceOrigin || o.origin), 'reply'),

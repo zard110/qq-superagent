@@ -13,6 +13,7 @@ flowchart LR
   E -->|ignore / unavailable| X[记录决定]
   P[群策略变更] -->|notice| K
   K -->|Assignment| W["Executor · 快答、群 Agent 或定时任务"]
+  W -->|阶段报告或最终报告| K
   K -->|Channel| S
 ```
 
@@ -89,6 +90,8 @@ docker compose -p qq-superagent ps -a
 - 用原管理员令牌登录面板，确认 QQ 显示“已连接”，旧群、人格、任务记录和供应商设置都能看到。若使用自动生成的令牌，可在新机执行 `docker compose -p qq-superagent exec app cat /state/admin-token`。
 - 在能力测试中读取一条带图的分享页，查看实际分析的图片。再从原 QQ 群引用一条历史回复追问，确认机器人接收、检索及投递正常。定时提醒和任务恢复会随应用启动，默认使用北京时间。
 - 若需退回旧机，先在新机执行 `docker compose -p qq-superagent stop app runner` 并停止群容器，再在旧机执行 `docker compose -p qq-superagent up -d`。旧卷可恢复到切换前的状态，新机切换后的消息和变更需另行保存。保留两端的卷和备份直至验收完成。
+
+长任务由执行 Agent 自行划分阶段。每个实际完成的阶段向当前 Ticket 报告成果和下一步，主任务合并待发进度并通过 QQ 投递。稳定的阶段编号用于恢复和去重。任务结束后，最终报告和附件优先。群友要求只收最终结果时，执行者按该要求工作。
 
 ## 群工作区与会话
 

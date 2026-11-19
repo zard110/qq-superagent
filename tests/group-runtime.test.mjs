@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { Store } from '../app/store.mjs'
 import { GroupRuntime } from '../app/group-runtime.mjs'
 import { Pending } from '../app/capabilities.mjs'
+import { QQ } from '../app/qq.mjs'
+import { recoverMediaItems } from '../app/harness.mjs'
 import { workerMedia } from '../app/worker-media.mjs'
 import { key } from '../app/messages.mjs'
 
@@ -280,6 +282,66 @@ test('重启后继续同一任务，部分交付保留原因且不会报告完�
   assert.equal(a.read('q').ticket, first.ticket)
   assert.equal(a.store.tickets.get(first.ticket).assignments[0].report.state, 'blocked')
   assert.equal(a.store.all('out').length, 1)
+})
+test('续办读取同一原消息的前序生产回执，保留最新状态并隔离其他任务', t => {
+  const {store} = fixture(t)
+  const put = (id,group,resumeOf,status) => {
+    const run={id,m:{group,id:'source'},ticket:'film',resumeOf}
+    store.put('run',id,run)
+    const item=key(id,'step')
+    store.put('mediaItem',item,{run:id,method:'generateVideo',item:id==='next'?'first':id})
+    store.put('step',item,{result:{status}})
+    return run
+  }
+  put('outside','elsewhere',null,'ok')
+  put('first','g','outside','pending')
+  put('second','g','first','ok')
+  const run=put('next','g','second','ok')
+  assert.deepEqual(recoverMediaItems(store,run).map(i=>[i.item,i.status]),[['first','ok'],['second','ok']])
+})
+test('长任务阶段报告进入 Ticket，主任务合并投递，恢复去重，最终附件保留回复次数', async t => {
+  let finished = false
+  const a = fixture(t, {
+    caps:{register() {}},
+    plan:async () => ({action:'new',goal:'work',progressReports:true}),
+    worker:async () => {if (!finished) throw new Pending('制作中'); return {text:'成片就绪'}},
+  })
+  const cfg = a.store.config()
+  cfg.qq.appId = 'test'
+  cfg.groups.g.active = false
+  a.store.put('config','main',cfg)
+  const qq = new QQ(a.runtime), sent = []
+  qq.request = async (url, payload) => {sent.push(payload);return {id:'qq-stage-'+sent.length}}
+  a.send('film','按阶段汇报，完成后交付')
+  await a.process('film')
+  const run = a.read('film')
+  assert.equal(a.runtime.reportStage(run,'prep','已就绪','开始采集').accepted,true)
+  assert.equal(a.runtime.reportStage(run,'prep','已就绪','开始采集').reused,true)
+  assert.equal(a.runtime.reportStage(run,'collection','素材已取回','正在制作').accepted,true)
+  assert.equal(a.store.tickets.get(run.ticket).assignments.at(-1).report.state,'progress')
+  assert.equal(a.store.all('out').length,0)
+  a.runtime.publishStages()
+  a.runtime.publishStages()
+  await qq.flush()
+  assert.equal(sent.length,1)
+  assert.match(sent[0].content,/已就绪；素材已取回\n正在制作/)
+  assert.equal(sent[0].msg_seq,1)
+  assert.equal(a.store.lookup('g','qq-stage-1').author,'@bot')
+  a.store.put('out','used',{group:'g',origin:'film',seq:3,status:'sent'})
+  a.runtime.reportStage(run,'cut','剪辑完成','正在验收')
+  a.runtime.publishStages()
+  await qq.flush()
+  assert.equal(sent.length,1)
+  a.runtime.reportStage(run,'audio','混音完成','正在导出')
+  a.runtime.publishStages()
+  finished=true
+  await a.process('film')
+  await qq.flush()
+  assert.equal(sent.length,1)
+  await qq.flush()
+  assert.equal(sent.length,2)
+  assert.equal(sent[1].msg_seq,4)
+  assert.equal(a.runtime.reportStage(run,'late','迟到报告','').accepted,false)
 })
 test('明确叫停正在运行的任务后，迟到结果不能进入发送队列', async (t) => {
   let target

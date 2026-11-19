@@ -12,6 +12,7 @@ async function main() {
       'install-deb',
       'fetch-skill',
       'media',
+      'progress',
       'call',
       'resource',
       'searchWeb',

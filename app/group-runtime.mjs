@@ -163,7 +163,7 @@ export class GroupRuntime extends PreviousRuntime {
         .filter(
           (o) =>
             o.group === m.group &&
-            o.status === 'held' &&
+            o.status === 'held' && !o.progressRun &&
             (!o.origin || s.lookup(m.group, o.origin)?.author === m.author),
         )
         .reverse()
@@ -263,7 +263,7 @@ export class GroupRuntime extends PreviousRuntime {
         this.engine.attach(prior.ticket, id, '管理员请求续办')
         run.ticket = prior.ticket
       }
-      s.put('run', id, { ...run, recovering: true })
+      s.put('run', id, { ...run, recovering: true, resumeOf: prior.id })
     })
   }
   intake(m, source, directed, id = source === 'timer' ? m.id : key(m.group, m.id)) {
@@ -314,6 +314,49 @@ export class GroupRuntime extends PreviousRuntime {
       }
     })
   }
+  reportStage(run, stage, completed, next = '') {
+    const s = this.store
+    return s.atomic(() => {
+      const current = run && s.get('run', run.id)
+      if (current?.state !== 'running' || current.social || !current.flow ||
+          !current.route?.progressReports || !current.assignment) return { accepted: false }
+      const ticket = s.tickets.get(current.ticket)
+      const trigger = s.triggers.get(triggerOf(current))
+      if (!ticket || ticket.ended || latestAssignment(ticket)?.id !== current.assignment ||
+          !trigger?.human || trigger.source !== 'qq' || !trigger.channel ||
+          trigger.channel.address.group !== current.m.group || !this.policy().revalidate(ticket.mandate))
+        return { accepted: false }
+      if (typeof stage !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(stage) ||
+          typeof completed !== 'string' || !completed.trim() || completed.length > 220 ||
+          typeof next !== 'string' || next.length > 160) throw Error('需要阶段编号、简短的完成情况和下一步')
+      const id = key(current.id, 'stage', stage)
+      if (s.get('stageReport', id)) return { accepted: true, reused: true }
+      const report = { stage, completed: completed.trim(), next: next.trim(), run: current.id, at: Date.now() }
+      this.engine.report(ticket.id, { state: 'progress', summary: report.completed })
+      s.put('stageReport', id, report)
+      const pending = s.get('stageBuffer', current.id) || { run: current.id, stages: [] }
+      pending.stages.push(id)
+      s.put('stageBuffer', current.id, pending)
+      return { accepted: true }
+    })
+  }
+  publishStages() {
+    const s = this.store
+    for (const buffer of s.all('stageBuffer')) s.atomic(() => {
+      const run = s.get('run', buffer.run)
+      s.del('stageBuffer', buffer.run)
+      if (run?.state !== 'running' || run.social || !inScope(run.m.group) || run.m.group === '@test') return
+      const ticket = s.tickets.get(run.ticket), trigger = s.triggers.get(triggerOf(run))
+      if (!ticket || ticket.ended || latestAssignment(ticket)?.id !== run.assignment ||
+          !trigger?.channel || !this.policy().revalidate(ticket.mandate)) return
+      const stages = buffer.stages.map(id => s.get('stageReport', id))
+      const done = stages.map(stage => stage.completed).join('；')
+      const next = stages.at(-1).next
+      const text = done + (next ? '\n' + next : '')
+      const id = key(run.id, 'stage-notice', buffer.stages)
+      this.channel({id, ticketId: ticket.id, channel: trigger.channel, text, kind:'progress', run:run.id})
+    })
+  }
   channelStatus(id) {
     const s = this.store,
       items = s.get('channel', id)?.rows || [id]
@@ -324,6 +367,12 @@ export class GroupRuntime extends PreviousRuntime {
   channel(o) {
     const s = this.store
     if (s.get('channel', o.id)) return
+    if (o.kind === 'progress') {
+      this.enqueue(o.id, o.channel.address.group, o.channel.address.message, o.text)
+      s.put('out', o.id, {...s.get('out', o.id), progressRun:o.run, plain:true})
+      s.put('channel', o.id, {ticket:o.ticketId, rows:[o.id]})
+      return
+    }
     const report = this.publishing
     if (!report) {
       this.enqueue(o.id, o.channel.address.group, o.channel.address.message, o.text)
@@ -379,6 +428,7 @@ export class GroupRuntime extends PreviousRuntime {
     })
   }
   async tick() {
+    this.publishStages()
     for (const job of this.store.all('cancel')) {
       if (this.busy.has('stop' + job.run.id)) continue
       this.busy.add('stop' + job.run.id)

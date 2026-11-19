@@ -31,6 +31,22 @@ async function body(req) {
   }
   return JSON.parse(Buffer.concat(chunks))
 }
+export function recoverMediaItems(store, current) {
+  const items = new Map(), seen = new Set()
+  const query = store.db.prepare("SELECT id,body FROM records WHERE bucket='mediaItem' AND json_extract(body,'$.run')=?")
+  for (let run = current; run && !seen.has(run.id); run = run.resumeOf && store.get('run',run.resumeOf)) {
+    if (run.ticket !== current.ticket || run.m.group !== current.m.group || run.m.id !== current.m.id) break
+    seen.add(run.id)
+    for (const row of query.all(run.id)) {
+      const {method,item} = JSON.parse(row.body), result = store.get('step',row.id)?.result
+      const id = key(method,item)
+      if (!items.has(id)) items.set(id,{method,item,status:result?.status || 'unknown',
+        resource:result?.data?.artifact || result?.data?.resource})
+    }
+  }
+  return [...items.values()]
+}
+
 export function startGateway(runtime, port = 8790) {
   // Rebind still queued/running requests before the scheduler starts polling.
   for (const lease of runtime.store.all('workerLease')) {
@@ -109,6 +125,11 @@ export function startGateway(runtime, port = 8790) {
       if (!Array.isArray(data.args) || data.args.some((a) => typeof a !== 'string'))
         throw Error('参数无效')
       let result
+      if (op === 'progress') {
+        const [stage, completed, next] = data.args
+        res.end(JSON.stringify(runtime.reportStage(current, stage, completed, next)))
+        return
+      }
       if(op==='review'){
         g.lease.reviewOnly=true
         g.caps.store.put('workerLease',g.ctx.run,g.lease)
@@ -118,10 +139,7 @@ export function startGateway(runtime, port = 8790) {
       if(op==='recover'){
         g.lease.recovering=true
         g.caps.store.put('workerLease',g.ctx.run,g.lease)
-        const items=g.caps.store.db.prepare("SELECT id,body FROM records WHERE bucket='mediaItem' AND json_extract(body,'$.run')=?").all(g.ctx.run).map(row=>{
-          const {method,item}=JSON.parse(row.body), result=g.caps.store.get('step',row.id)?.result
-          return {method,item,status:result?.status || 'unknown',resource:result?.data?.artifact || result?.data?.resource}
-        })
+        const items = recoverMediaItems(g.caps.store, current)
         res.end(JSON.stringify({items,reviewOnly:!!g.lease.reviewOnly}))
         return
       }
@@ -404,7 +422,7 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
   return {
     ...identity,
     flow:run.flow,
-    recovering,
+    recovering: recovering || !!run.resumeOf,
     goal: run.route?.goal,
     sourceSite: run.route?.sourceSite,
     model: model.model,
@@ -419,6 +437,7 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
     assignment:run.route?.brief,
     executionQuote:run.social ? undefined : run.route?.executionQuote,
     productionMode:run.social ? undefined : run.route?.productionMode,
+    progressReports: !!run.flow && !run.social && run.route?.progressReports === true,
     checks:run.route?.checks,
     assignmentInputs:run.assignmentInputs,
     deferredInputs,
