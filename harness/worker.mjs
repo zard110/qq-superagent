@@ -1,4 +1,5 @@
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
+import { workerSkills } from './production-skills.mjs'
 import {
   mkdir,
   readFile,
@@ -42,10 +43,10 @@ async function turn(job) {
     if (!/^[a-f0-9]{32}\.[a-z0-9]+$/.test(file.name)) throw Error('Invalid input filename')
     await writeFile(join(inputs, file.name), Buffer.from(file.data, 'base64'))
   }
-  const home = join(dir, '.harness'),
-    patch = join(dir, '.provider.json')
-  const marker = join(dir, '.session'),
-    sessionId = 'worker-' + job.ticket
+  const installed = '/work/home/.agents/skills'
+  await mkdir(installed, { recursive: true })
+  const { home, marker, sessionId, directory } = await workerSkills(dir, installed, job)
+  const patch = join(dir, '.provider.json')
   const saved = await readFile(marker, 'utf8').catch((e) => {
     if (e.code !== 'ENOENT') throw e
     return ''
@@ -54,7 +55,7 @@ async function turn(job) {
   await utimes(dir, now, now)
   const gateway = 'http://app:8790/task'
   await writeFile('/tmp/qq-task-lease', job.token, { mode: 0o600 })
-  await mkdir('/work/home/.agents/skills', { recursive: true })
+  // Group skills remain available alongside this ticket's production adapter.
   const env = {
     ...process.env,
     DSH_AGENTS_HOME: '/work/home/.agents',
@@ -132,7 +133,9 @@ async function turn(job) {
           : job.goal === 'document'
             ? '交付完整 UTF-8 的 md 或 txt 文档，放入本轮输出目录。'
             : '',
-      skillsDirectory: '/work/home/.agents/skills',
+      skillsDirectory: directory,
+      otherGroupSkills: directory === installed ? undefined : installed,
+      productionMode: job.productionMode,
       request: job.question,
       persona: job.persona,
       sender: job.sender,
@@ -318,7 +321,7 @@ if (process.argv[2] === 'prune') {
       stat = await lstat(dir)
     if (Date.now() - stat.mtimeMs < 7 * 86400000) continue
     for (const file of await readdir(dir)) {
-      if (['.harness', '.session'].includes(file)) continue
+      if (['.harness', '.session', '.harness-production', '.session-production'].includes(file)) continue
       await rm(join(dir, file), { recursive: true, force: true })
     }
   }

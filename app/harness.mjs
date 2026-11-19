@@ -418,6 +418,7 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
     question: publicShareText(m.text),
     assignment:run.route?.brief,
     executionQuote:run.social ? undefined : run.route?.executionQuote,
+    productionMode:run.social ? undefined : run.route?.productionMode,
     checks:run.route?.checks,
     assignmentInputs:run.assignmentInputs,
     deferredInputs,
