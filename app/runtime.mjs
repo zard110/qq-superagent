@@ -870,7 +870,7 @@ export class Runtime {
         s.put('awaitReply', key(m.group, m.author), { source: out, until: Date.now() + 1800000 })
       if (text) {
         this.enqueue(out, m.group, origin, text, undefined)
-        if(run.flow) s.put('out',out,{...s.get('out',out),replyId:out})
+        if(run.flow) s.put('out',out,{...s.get('out',out),replyId:out,statusRun:run.route?.statusRun})
       }
       const deliveries = result.artifacts || (artifact ? [artifact] : [])
       for (const [i, file] of deliveries.entries()) {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { taskStatus } from './task-status.mjs'
 import { remote } from './network.mjs'
 import { key, groupPolicy } from './messages.mjs'
 const api = 'https://api.bot.qq.com'
@@ -426,12 +427,14 @@ export class QQ {
     return true
   }
   async flush() {
-    if (this.sending || !this.store.config().qq.appId) return
-    this.sending = true
+    const s = this.store
+    if (!s.config().qq.appId) return
+    this.sending ||= new Set()
+    const o = s.nextDelivery([...this.sending])
+    if (!o) return
+    const source = JSON.stringify([o.group, o.origin || o.replyId || o.id])
+    this.sending.add(source)
     try {
-      const s = this.store
-      const o = s.nextDelivery()
-      if (!o) return
       const origin = o.origin && s.lookup(o.group, o.origin)
       let passive = origin && Date.now() - Date.parse(origin.at) < 295000
       try {
@@ -470,6 +473,7 @@ export class QQ {
             return
           }
         }
+        if (o.statusRun) o.text = taskStatus(s, o.group, o.statusRun)
         const body = o.artifact
           ? { msg_type: 7, media: { file_info: info } }
           : o.plain
@@ -497,6 +501,7 @@ export class QQ {
           if (bot)
             s.message({
               ...bot,
+              ...(o.statusRun && {text:o.text,parts:[{type:'text', text:o.text, source:reply.id}]}),
               id: reply.id,
               idx: reply.message_scene?.ext?.find((x) => x.startsWith('msg_idx='))?.slice(8) || reply.id,
             })
@@ -512,7 +517,7 @@ export class QQ {
         s.put('out', o.id, o)
       }
     } finally {
-      this.sending = false
+      this.sending.delete(source)
     }
   }
 }

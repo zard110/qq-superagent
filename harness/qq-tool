@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 async function main() {
   const [op, ...args] = process.argv.slice(2)
   if (op === 'install-skill' && args.length === 1) {
-    execFileSync(process.execPath, ['/opt/harness/install_skill.mjs', args[0]], { stdio: 'inherit' })
+    execFileSync('flock', ['/tmp/qq-install-skill.lock', process.execPath, '/opt/harness/install_skill.mjs', args[0]], { stdio: 'inherit' })
     return
   }
   if (
@@ -26,7 +26,15 @@ async function main() {
     throw Error(
       'qq-tool fetch-skill OWNER/REPO | install-skill DIRECTORY | install-deb PACKAGE | searchWeb QUERY | readWebPage URL | searchGroupMemory JSON | searchHistory JSON | fetchImage POST_URL IMAGE_HANDLE_OR_MEDIA_URL',
     )
-  const token = fs.readFileSync('/tmp/qq-task-lease', 'utf8')
+  let token = process.env.QQ_TASK_TOKEN
+  // Some SDK shells filter environment variables. Resolve our own supervisor even after chdir.
+  for (let pid = process.ppid; !token && pid > 1;) {
+    try { token = fs.readFileSync('/tmp/qq-agents/lease-' + pid, 'utf8') }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8')
+    pid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
+  }
+  if (!token) throw Error('本次任务凭证已失效')
   const request = () => fetch('http://app:8790/task/' + op, {
     method: 'POST',
     headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },

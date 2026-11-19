@@ -3,6 +3,7 @@ import { Engine, latestAssignment } from './core.mjs'
 import { key, groupPolicy, replyMentions } from './messages.mjs'
 import { fastRoute } from './fast-routing.mjs'
 import { planAssignment, quickAnswer, toolAgent } from './assignment.mjs'
+import { taskStatus } from './task-status.mjs'
 import { Pending } from './capabilities.mjs'
 import { historyEnabled } from './memory.mjs'
 import { executeHarness, cancelHarness } from './harness.mjs'
@@ -397,10 +398,12 @@ export class GroupRuntime extends PreviousRuntime {
       this.engine.inputsRead(t.id, run.inputIds || [])
       const timer = run.executor === 'reminder'
       const more = s.pendingRuns().some((other) => other.id !== run.id && other.ticket === t.id)
-      const state = failed ? 'failed' : result.partial ? 'blocked' : more ? 'progress' : 'ready'
+      const previous = run.subscribed && run.executor === 'status' ? latestAssignment(t).report : undefined
+      const state = previous && ['blocked','failed'].includes(previous.state) ? previous.state
+        : failed ? 'failed' : result.partial ? 'blocked' : more ? 'progress' : 'ready'
       this.engine.report(t.id, {
         state,
-        summary: (text || '已交付附件').slice(0, 1400),
+        summary: previous?.summary || (text || '已交付附件').slice(0, 1400),
         ...(timer ? {} : { answers: id }),
       })
       if (run.fast?.responsibleStarted) run.fast.responsibleMs = Date.now() - run.fast.responsibleStarted
@@ -438,7 +441,6 @@ export class GroupRuntime extends PreviousRuntime {
         .finally(() => this.busy.delete('stop' + job.run.id))
     }
     for (const r of this.store.pendingRuns()) {
-      if (this.busy.size >= 4) break
       if (this.busy.has(r.id) || r.after > Date.now()) continue
       this.busy.add(r.id)
       void this.process(r)
@@ -536,6 +538,13 @@ export class GroupRuntime extends PreviousRuntime {
           s.put('run', run.id, { ...run, state: 'ignored' })
           return false
         }
+        if (!run.ticket && run.route.attachRun && !run.route.attach) {
+          const prior = s.get('run', run.route.attachRun)
+          if (prior?.m.group === run.m.group) {
+            if (live(prior) && !prior.ticket) return pause()
+            run.route.attach = prior.ticket
+          }
+        }
         if (!run.ticket && run.route.attach) {
           const t = s.tickets.get(run.route.attach)
           if (
@@ -575,14 +584,39 @@ export class GroupRuntime extends PreviousRuntime {
       run.state = 'running'
       s.put('run', run.id, run)
       if ((!run.ticket || !run.assessed) && !(await this.admit(run))) return
-      const prior = s.pendingRuns().find((r) => r.ticket === run.ticket)
-      if (prior && prior.id !== run.id) return pause()
+      if (run.route?.action === 'status' && run.subscribed) {
+        const ticket = s.tickets.get(run.ticket)
+        const assignment = latestAssignment(ticket)
+        if (ticket.ended) {
+          s.put('run', run.id, {...run, state:'stopped'})
+          return
+        }
+        run.executor = 'status'
+        run.assignment = assignment.id
+        run.inputIds = ticket.inputs.filter(i => i.triggerId === triggerOf(run)).map(i => i.id)
+        s.atomic(() => {
+          if (assignment.state === 'pending') this.engine.assignmentStarted(ticket.id, assignment.id)
+          this.engine.inputsDelivered(ticket.id, assignment.id, run.inputIds)
+          this.finish(run, taskStatus(s, run.m.group, run.route.statusRun))
+        })
+        return
+      }
+      if (!run.assignment && run.route?.action !== 'status') {
+        const pending = s.pendingRuns()
+        const earlier = pending.slice(0, pending.findIndex(r => r.id === run.id))
+        if (earlier.some(r => r.ticket === run.ticket && r.route?.action !== 'status'))
+          throw new Pending('等待同一任务的上一条请求')
+        // Two edits can finish planning out of order. Wait only for earlier routing decisions.
+        if (run.route?.action === 'continue' && earlier.some(r => r.m.group === run.m.group && !r.assessed && !r.ticket))
+          throw new Pending('等待之前的消息完成分流')
+      }
       const t = s.tickets.get(run.ticket),
         a = latestAssignment(t)
       if (t.ended) {
         s.put('run', run.id, { ...run, state: 'stopped' })
         return
       }
+      delete run.waitReason
       run.assignment = a.id
       const command = s.get('assignmentWork', a.id)
       if (a.state === 'pending' && command?.state !== 'pending') throw Error('任务缺少执行分配记录')
@@ -631,7 +665,10 @@ export class GroupRuntime extends PreviousRuntime {
       }
       if (run.executor === 'archive') return await this.archiveDay(run)
       if (run.executor === 'reminder') result = { text: run.m.text }
-      else if (run.route?.action === 'clarify' || run.route?.action === 'stop')
+      else if (run.route?.action === 'status') {
+        run.executor = 'status'
+        result = {text:taskStatus(s, run.m.group, run.route.statusRun)}
+      } else if (run.route?.action === 'clarify' || run.route?.action === 'stop')
         result = { text: run.route.question }
       else if (run.executor === 'quick') {
         const text = await quickAnswer(this, run)
@@ -661,7 +698,7 @@ export class GroupRuntime extends PreviousRuntime {
     } catch (e) {
       if (!live(s.get('run', run.id))) return
       if (e instanceof Pending) {
-        s.put('run', run.id, { ...run, after: Math.max(run.after || 0, Date.now() + 1500) })
+        s.put('run', run.id, { ...run, waitReason: e.message, after: Math.max(run.after || 0, Date.now() + 1500) })
         return
       }
       if (run.assignment) this.finish(run, '这次处理遇到问题：' + e.message, null, true)

@@ -21,7 +21,7 @@ const engagement = {
 }
 const difficulty = {
   quick: '仅用现有文字就能可靠回答的简短问候、常识和追问。',
-  responsible: '需要工具、实时信息、群历史、创作或处理文件、复杂推理、续办任务或澄清对象。',
+  responsible: '需要工具、实时信息、群历史、创作或处理文件、复杂推理、查询任务当前进度或是否已交付、修改或续办任务、澄清对象。',
 }
 
 export async function classify(jev, state) {

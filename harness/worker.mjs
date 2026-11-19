@@ -54,7 +54,7 @@ async function turn(job) {
   const now = new Date()
   await utimes(dir, now, now)
   const gateway = 'http://app:8790/task'
-  await writeFile('/tmp/qq-task-lease', job.token, { mode: 0o600 })
+  // Each SDK instance receives the credential for its own run.
   // Group skills remain available alongside this ticket's production adapter.
   const env = {
     ...process.env,
@@ -313,7 +313,6 @@ async function turn(job) {
     return response
   } finally {
     await h.close()
-    await rm('/tmp/qq-task-lease', { force: true })
   }
 }
 let body = ''

@@ -212,7 +212,7 @@ export function startGateway(runtime, port = 8790) {
       if (op === 'install-deb') {
         const r = await fetch(runner() + '/install-deb', {
           method: 'POST',
-          body: JSON.stringify({ token, group: g.group, packages: data.args }),
+          body: JSON.stringify({ token, group:g.group, ticket:g.workspace, run:g.ctx.run, packages:data.args }),
           signal: AbortSignal.timeout(250000),
         })
         result = await r.json()
@@ -313,6 +313,7 @@ function grant(runtime, run, lease) {
     model = provider(config, 'worker')
   const g = {
     group: key(run.m.group),
+    workspace: key(run.m.group,run.route?.session || run.ticket),
     model,
     lease,
     caps: runtime.caps,
@@ -334,7 +335,7 @@ async function groupRequest(path, payload) {
   } catch {
     throw new Pending('等待 Runner 连接恢复')
   }
-  if (response.status === 429) throw new Pending('等待群工作区')
+  if (response.status === 429) throw new Pending('等待同一任务的工作区')
   const out = await response.json()
   if (response.status >= 500) throw new Pending('等待 Runner 恢复')
   if (!response.ok) throw Error(out.error || 'Runner 请求失败')
@@ -346,7 +347,10 @@ function generalTools(caps,config,group) {
 }
 export async function cancelHarness(runtime,run,lease){
   grants.delete(lease.token)
-  await groupRequest('/group/cancel',{group:key(run.m.group),ticket:key(run.m.group,run.route?.session || run.ticket),run:run.id,token:lease.token})
+  const identity = {group:key(run.m.group), ticket:key(run.m.group,run.route?.session || run.ticket), run:run.id, token:lease.token}
+  const status = await groupRequest('/group/cancel',identity)
+  if (status.state === 'running') throw new Pending('等待此任务的进程退出')
+  if (status.state === 'finished') await groupRequest('/group/ack',identity)
   runtime.store.del('workerLease',run.id)
 }
 async function makeJob(runtime, run, ref, identity, model, recovering) {
@@ -471,16 +475,20 @@ export async function executeHarness(runtime, run, ref) {
     let status = await groupRequest('/group/status', identity)
     if (status.state === 'missing') {
       const recovering = !!lease.submitted
-      status = await groupRequest(
-        '/group',
-        await makeJob(runtime, run, ref, identity, model, recovering),
-      )
+      const job = await makeJob(runtime, run, ref, identity, model, recovering)
+      const stopped = () => run.flow && !['queued','running'].includes(store.get('run',run.id)?.state)
+      if (stopped()) throw Error('任务已停止')
+      status = await groupRequest('/group', job)
+      if (stopped()) {
+        store.put('cancel', run.id, {run, lease})
+        throw Error('任务已停止')
+      }
       lease.submitted = true
       store.put('workerLease', run.id, lease)
       if (recovering) run.recovering = true
     }
+    if (status.progress) run.progress = { ...status.progress, calls: lease.calls, recovering: !!run.recovering }
     if (status.state === 'running') {
-      run.progress = { ...status.progress, calls: lease.calls, recovering: !!run.recovering }
       throw new Pending('后台执行中')
     }
     if (status.state !== 'finished') throw Error('Runner 返回了未知状态')

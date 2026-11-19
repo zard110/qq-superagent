@@ -51,6 +51,89 @@ function fixture(t, options = {}) {
   const process = (id) => runtime.process(read(id))
   return { store, runtime, send, read, process }
 }
+test('五个独立委托执行期间仍接收和回答同群快答', async t => {
+  const held = Promise.withResolvers(), started = new Set()
+  const a = fixture(t,{worker: async (_, run) => {
+    started.add(run.m.id)
+    await held.promise
+    return {text:'完成'}
+  }})
+  for (let i = 0; i < 5; i++) a.send('long'+i,'独立委托 '+i)
+  await a.runtime.tick()
+  await new Promise(resolve => setImmediate(resolve))
+  try {
+    assert.equal(started.size,5)
+    const c = a.store.config()
+    c.vendors.jev.enabled = true
+    a.store.put('config','main',c)
+    t.mock.method(globalThis,'fetch', async () => Response.json({answers:{
+      engagement:{choice:'requested'}, difficulty:{choice:'quick'}, memory:{choice:'none'}
+    }}))
+    a.send('chat','你好')
+    await a.runtime.tick()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(a.read('chat').executor,'quick')
+    assert.equal(a.read('chat').state,'done')
+    assert.equal(a.read('long0').state,'running')
+  } finally {
+    held.resolve()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+})
+
+test('同群独立任务先完成，同任务修改恢复后按顺序，引用查询能即时取得阶段进度', async t => {
+  let waiting = true
+  const executed = []
+  const a = fixture(t,{plan:async (_,r) => r.m.id === 'check' ?
+    {action:'status',statusRun:a.read('a').id} : {action:'new',progressReports:true},
+    worker:async (_,r) => {
+      if (waiting && r.m.id === 'a') throw new Pending('后台执行中')
+      executed.push(r.m.id)
+      return {text:'完成 '+r.m.id}
+    }})
+  a.send('a','制作音频')
+  await a.process('a')
+  a.runtime.reportStage(a.read('a'),'lyrics','歌词已经写好','正在录音')
+  a.send('edit','加一句歌词','a')
+  await a.process('edit')
+  a.send('edit2','再改节奏','a')
+  await a.process('edit2')
+  a.send('check','制作到哪一步了','a')
+  await a.process('check')
+  assert.match(a.read('check').answer,/歌词已经写好/)
+  assert.equal(a.store.tickets.get(a.read('a').ticket).ended,undefined)
+  a.send('b','另外制作一个表格')
+  await a.process('b')
+  assert.deepEqual(executed,['b'])
+  waiting = false
+  const restored = new GroupRuntime(a.store,a.runtime.caps,{worker:a.runtime.worker,plan:a.runtime.plan})
+  for (const id of ['edit2','a','edit2','edit','edit2']) await restored.process(a.read(id))
+  assert.deepEqual(executed,['b','a','edit','edit2'])
+})
+
+test('同群附件上传期间可投递另一条消息，同来源保持顺序且只发送一次', async t => {
+  const a = fixture(t,{caps:{register(){}}}), s = a.store, qq = new QQ(a.runtime)
+  const c = s.config()
+  c.qq.appId = 'test'
+  s.put('config','main',c)
+  a.send('a','原消息'); a.send('b','另一条消息')
+  const hold = Promise.withResolvers(), sent = []
+  qq.upload = () => hold.promise
+  qq.request = async (_,body) => {sent.push([body.msg_id,body.msg_seq]);return {id:'sent'+sent.length}}
+  a.runtime.enqueue('file','g','a','','resource')
+  a.runtime.enqueue('after','g','a','同一条消息的后续')
+  a.runtime.enqueue('other','g','b','另一件事')
+  const uploading = qq.flush()
+  try {
+    await Promise.all([qq.flush(),qq.flush()])
+    assert.deepEqual(sent,[['b',1]])
+  } finally {
+    hold.resolve('ready'); await uploading
+  }
+  await qq.flush()
+  assert.deepEqual(sent,[['b',1],['a',1],['a',2]])
+})
+
 test('Jev 超时后的自然续句仍由规划模型结合群聊决定是否接话', async (t) => {
   let planned = 0
   const a = fixture(t, {

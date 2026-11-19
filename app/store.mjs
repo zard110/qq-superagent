@@ -94,12 +94,12 @@ export class Store {
       .all()
       .map((row) => JSON.parse(row.body))
   }
-  nextDelivery() {
+  nextDelivery(busy = []) {
     const row = this.db
       .prepare(
-        "SELECT o.body FROM records o WHERE o.bucket='out' AND json_extract(o.body,'$.status')='pending' AND coalesce(json_extract(o.body,'$.after'),0)<=? AND (json_extract(o.body,'$.previous') IS NULL OR EXISTS(SELECT 1 FROM records p WHERE p.bucket='out' AND p.id=json_extract(o.body,'$.previous') AND json_extract(p.body,'$.status')='sent')) ORDER BY o.rowid LIMIT 1",
+        "SELECT o.body FROM records o WHERE o.bucket='out' AND json_extract(o.body,'$.status')='pending' AND json_array(json_extract(o.body,'$.group'),coalesce(nullif(json_extract(o.body,'$.origin'),''),nullif(json_extract(o.body,'$.replyId'),''),o.id)) NOT IN (SELECT value FROM json_each(?)) AND coalesce(json_extract(o.body,'$.after'),0)<=? AND (json_extract(o.body,'$.previous') IS NULL OR EXISTS(SELECT 1 FROM records p WHERE p.bucket='out' AND p.id=json_extract(o.body,'$.previous') AND json_extract(p.body,'$.status')='sent')) ORDER BY o.rowid LIMIT 1",
       )
-      .get(Date.now())
+      .get(JSON.stringify(busy), Date.now())
     return row && JSON.parse(row.body)
   }
   nextSequence(group, origin) {

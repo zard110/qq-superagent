@@ -19,6 +19,9 @@ services:
     build: ./runner
     environment:
       GROUP_PROJECT: ${COMPOSE_PROJECT_NAME}
+      GROUP_MEMORY_LIMIT: ${GROUP_MEMORY_LIMIT:-4g}
+      GROUP_CPU_LIMIT: ${GROUP_CPU_LIMIT:-}
+      GROUP_PIDS_LIMIT: ${GROUP_PIDS_LIMIT:-512}
     restart: unless-stopped
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
     networks: [workers]

@@ -17,7 +17,7 @@ http
       res.writeHead(429).end()
       return
     }
-    active++
+    if (req.url === '/') active++
     const name = 'qq-task-' + randomUUID()
     try {
       let size = 0
@@ -30,14 +30,14 @@ http
       const input = Buffer.concat(chunks)
       const payload = JSON.parse(input)
       if (req.url !== '/') {
-        const result =
+        const result = await (
           req.url === '/group'
             ? submitGroup(payload)
             : req.url === '/group/status'
-              ? await pollGroup(payload)
+              ? pollGroup(payload)
               : req.url === '/group/ack'
                 ? acknowledgeGroup(payload)
-                : req.url === '/group/cancel' ? cancelGroup(payload) : await installDeb(payload)
+                : req.url === '/group/cancel' ? cancelGroup(payload) : installDeb(payload))
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(result))
         return
@@ -91,7 +91,7 @@ http
       res.writeHead(e.status || 422).end(JSON.stringify({ error: e.message }))
       if (req.url === '/') execFile('docker', ['rm', '-f', name], () => {})
     } finally {
-      active--
+      if (req.url === '/') active--
     }
   })
   .listen(8090)
