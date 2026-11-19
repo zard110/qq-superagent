@@ -363,9 +363,20 @@ export class QQ {
       sha1: hash('sha1', bytes),
       md5_10m: hash('md5', bytes.subarray(0, 10002432)),
     })
-    for (const part of prep.parts) {
-      const offset = part.index * Number(prep.block_size),
-        chunk = bytes.subarray(offset, offset + Number(part.block_size))
+    // QQ responses use both zero-based and one-based indices. The index identifies the
+    // part in the acknowledgement. Slice the file by the validated sequence of byte lengths.
+    const parts = [...prep.parts].sort((a,b) => a.index - b.index)
+    const first = parts[0]?.index
+    let offset = 0
+    if (![0,1].includes(first)) throw Error('QQ 返回的分片序号无效')
+    for (const [i,part] of parts.entries()) {
+      const size = Number(part.block_size ?? prep.block_size)
+      if (part.index !== first+i || !Number.isSafeInteger(size) || size <= 0 || offset >= bytes.length)
+        throw Error('QQ 返回的分片范围无效')
+      const chunk = bytes.subarray(offset, offset + size)
+      offset += chunk.length
+      if ((i === parts.length - 1) !== (offset === bytes.length))
+        throw Error('QQ 返回的分片未覆盖整个文件')
       const res = await fetch(part.presigned_url, {
         method: 'PUT',
         body: chunk,

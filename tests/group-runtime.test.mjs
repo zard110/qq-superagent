@@ -311,6 +311,29 @@ test('续办读取同一原消息的前序生产回执，保留最新状态并�
   const run=put('next','g','second','ok')
   assert.deepEqual(recoverMediaItems(store,run).map(i=>[i.item,i.status]),[['first','ok'],['second','ok']])
 })
+test('QQ 大文件按字节切分，兼容从 0 和从 1 开始的回执并完整上传末块', async t => {
+  const bytes = Buffer.concat([Buffer.alloc(5000000,1),Buffer.alloc(321,2)])
+  const a = fixture(t,{caps:{register(){},file:async()=>({bytes,mime:'video/mp4'})}})
+  const qq = new QQ(a.runtime), uploaded = []
+  t.mock.method(globalThis,'fetch',async (_,options)=>{
+    uploaded.push(Buffer.from(options.body))
+    return new Response()
+  })
+  for(const [first,sizes] of [[0,[5000000,321]],[1,[5000000,321]],[1,[bytes.length]]]) {
+    const confirmed=[]
+    uploaded.length=0
+    qq.request=async (url,body)=>{
+      if (url.endsWith('/upload_prepare')) return {upload_id:'u',block_size:String(sizes[0]),
+        parts:sizes.map((size,i)=>({index:first+i,block_size:String(size),presigned_url:'https://example.invalid/put'})).reverse()}
+      if(url.endsWith('/upload_part_finish')) {confirmed.push([body.part_index,Number(body.block_size)]);return {}}
+      assert.equal(body.srv_send_msg,false)
+      return {file_info:'ready'}
+    }
+    assert.equal(await qq.upload('g','file'),'ready')
+    assert.deepEqual(confirmed,sizes.map((size,i)=>[first+i,size]))
+    assert.ok(Buffer.concat(uploaded).equals(bytes))
+  }
+})
 test('长任务阶段报告进入 Ticket，主任务合并投递，恢复去重，最终附件保留回复次数', async t => {
   let finished = false
   const a = fixture(t, {
