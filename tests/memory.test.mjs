@@ -9,6 +9,32 @@ import { MemoryArchive, recentMemory, searchMemory } from '../app/memory.mjs'
 import { key } from '../app/messages.mjs'
 import { Runtime } from '../app/runtime.mjs'
 import { decideConversation } from '../app/conversation.mjs'
+import { saveStatement, cardsFor } from '../app/cards.mjs'
+
+test('每天归档提升候选并保留来源，重放和过期更正都不会覆盖新设定', async (t) => {
+  const {dir, store}=fixture(t)
+  const m=message('g','member-note','2026-11-18T13:30:00+08:00','青禾负责例会')
+  store.message(m)
+  const receipt=saveStatement(store,m,'candidate')
+  assert.deepEqual(saveStatement(store,m,'save'),receipt)
+  assert.equal(cardsFor(store,'g').length,0)
+  const archive=new MemoryArchive(store,dir,async(_,dialog)=>{
+    const batch=JSON.parse(dialog[1].content)
+    assert.equal(batch.candidates.length,1)
+    return {content:JSON.stringify({entries:[],changes:[{action:'keep',text:'青禾负责例会',sources:[batch.messages[0].id]}]})}
+  })
+  await archive.tick(Date.parse('2026-11-19T01:00:00+08:00'))
+  const [original]=cardsFor(store,'g')
+  assert.deepEqual(original.sources,[{id:m.id,at:m.at,author:m.author}])
+  const edit=message('g','edit','2026-11-19T09:00:00+08:00','青禾改为负责排期')
+  store.message(edit)
+  assert.equal(saveStatement(store,edit,'correct',original).status,'active')
+  const stale={...edit,id:'outdated'}
+  store.message(stale)
+  assert.equal(saveStatement(store,stale,'correct',original).status,'candidate')
+  assert.deepEqual(cardsFor(store,'g').map(c=>c.text),[edit.text])
+  assert.deepEqual(cardsFor(store,'another'),[])
+})
 
 test('自然模式在冷却中仍分派未 @ 的剧本续办，主动闲聊保持安静', async (t) => {
   const { dir, store, config } = fixture(t)

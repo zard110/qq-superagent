@@ -66,6 +66,13 @@ function item(title, detail) {
     '<div class="item"><strong>' + escape(title) + '</strong><small>' + escape(detail) + '</small></div>'
   )
 }
+const lanes = { silent:'静默', quick:'快答', responsible:'负责模型', classifying:'判断中' }
+const disposition = {requested:'被请求', proactive:'主动参与', quiet:'要求安静', silent:'旁听'}
+function routeSummary(fast) {
+  if (!fast) return ''
+  return [lanes[fast.lane], ...[['Jev',fast.jevMs],['快答',fast.quickMs],['负责模型',fast.responsibleMs]]
+    .filter(([,ms])=>ms != null).map(([name,ms])=>name+' '+ms+' ms'),fast.fallback].filter(Boolean).join(' · ')
+}
 const val = (id) => $('#' + id).value
 const btn = (id, title) => '<button id="' + id + '">' + title + '</button>'
 function on(id, fn) {
@@ -113,7 +120,7 @@ function render() {
         btn('reload', '刷新') +
           state.runs
             .map((r) =>
-              item(r.question, r.group + ' · ' + r.state + ' · ' + (r.answer || r.ticket || '')),
+              item(r.question, [r.group, r.state, routeSummary(r.fast), r.answer || r.ticket].filter(Boolean).join(' · ')),
             )
             .join('') +
           (state.runs.length ? '' : '<p>等待群消息</p>'),
@@ -153,7 +160,9 @@ function render() {
           const pre = document.createElement('pre')
           pre.textContent = JSON.stringify(
             {
+              lifecycle: detail.lifecycle,
               executor: detail.executor,
+              fastRoute: detail.fast,
               conversation: detail.route,
               progress: detail.progress,
               steps: detail.steps,
@@ -181,6 +190,72 @@ function render() {
         '<p><a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">管理官方 API Key</a> · <a href="https://api-docs.deepseek.com/zh-cn/news/news261113/" target="_blank" rel="noreferrer">官方能力说明</a></p>' +
         btn('vendorSave', '保存供应商'),
     )
+    const profiles = [['openai','compat','负责模型 · OpenAI 兼容接口'], ['quick','quick','简单模型 · 直接快答']]
+    for (const [role,id,title] of profiles) {
+      const profile = c.vendors[role]
+      view.innerHTML += card(title,
+        field(id+'Base', 'API 基址', profile.base) +
+        select(id+'Model', '模型名', [...(profile.model ? [[profile.model,profile.model]] : []), ['', '手动输入模型名']], profile.model) +
+        '<div id="'+id+'Manual">' + field(id+'Custom','自定义模型名',profile.model) + '</div>' +
+        btn(id+'Refresh','刷新模型列表') + '<small id="'+id+'Status" role="status"></small>' +
+        field(id+'Key','API Key',profile.key,'password') +
+        select(id+'Effort','思考强度',['','none','minimal','low','medium','high','xhigh'].map(v=>[v,v || '使用接口默认值']),profile.effort) +
+        btn(id+'Save','保存接口') + (role === 'quick' ? btn('quickTest','测试已保存的简单模型') : ''))
+    }
+    const jev = c.vendors.jev
+    view.innerHTML += card('Jev 快速路由',
+      '<label><input id="jevEnabled" type="checkbox" ' + (jev.enabled ? 'checked' : '') + '> 启用群消息快速路由</label>' +
+      field('jevBase','判断接口地址',jev.base) + field('jevKey','TypeSafe API Key',jev.key,'password') +
+      field('jevModel','Jev 模型',jev.model) + btn('jevSave','保存路由') + btn('jevTest','测试已保存的路由') +
+      '<small id="jevStatus" role="status"></small>')
+    view.innerHTML += card('BeefTV', field('beefKey','媒体 API Key',c.vendors.beeftv.key,'password') + btn('beefSave','保存媒体密钥'))
+    on('beefSave', async () => { c.vendors.beeftv.key = val('beefKey').trim(); await save() })
+    on('jevSave', async () => {
+      Object.assign(jev,{enabled:$('#jevEnabled').checked,base:val('jevBase').trim(),key:val('jevKey').trim(),model:val('jevModel').trim()})
+      await save()
+    })
+    on('jevTest', async () => {
+      const r = await api('test-routing',{role:'jev'})
+      $('#jevStatus').textContent = '示例「公路车 54 码是什么意思？」 · ' + disposition[r.engagement] + ' · ' + lanes[r.lane] + ' · ' + r.ms + ' ms'
+    })
+    on('quickTest', async () => {
+      const r = await api('test-routing',{role:'quick'})
+      $('#quickStatus').textContent = r.answer + ' · ' + r.ms + ' ms'
+    })
+    for (const [role,id] of profiles) {
+      const profile = c.vendors[role], picker = $('#'+id+'Model'), status = $('#'+id+'Status')
+      const update = () => { $('#'+id+'Manual').hidden = Boolean(picker.value) }
+      picker.onchange = update
+      update()
+      let serial = 0
+      const load = async () => {
+        const version = ++serial, base = val(id+'Base').trim(), key = val(id+'Key').trim()
+        const current = () => version === serial && picker.isConnected
+        status.textContent = '正在读取…'
+        try {
+          const {models} = await api('models',{role,base,key})
+          if (!current()) return
+          const chosen = picker.value
+          const ids = [...new Set([chosen,...models].filter(Boolean))]
+          picker.replaceChildren(...ids.map(v=>new Option(v,v)),new Option('手动输入模型名',''))
+          picker.value = chosen
+          update()
+          status.textContent = models.length ? '' : '接口未列出模型，可手动输入。'
+        } catch (e) {
+          if (current()) status.textContent = e.message + '，可手动输入。'
+        }
+      }
+      on(id+'Refresh',load)
+      for (const suffix of ['Base','Key']) $('#'+id+suffix).oninput = () => {
+        serial++
+        status.textContent = '接口已更改，可刷新模型列表。'
+      }
+      if (profile.base && (profile.key || profile.model)) void load()
+      on(id+'Save', async () => {
+        Object.assign(profile,{base:val(id+'Base').trim(),model:picker.value || val(id+'Custom').trim(),key:val(id+'Key').trim(),effort:val(id+'Effort')})
+        await save()
+      })
+    }
     on('vendorSave', async () => {
       vendor.key = val('deepseekKey').trim()
       await save()
@@ -209,7 +284,7 @@ function render() {
       card(
         '工具与媒体',
         '<div class="grid">' +
-          ['search', 'fetch', 'speech', 'ocr', 'tts', 'image'].map(pick).join('') +
+          ['search', 'fetch', 'speech', 'ocr', 'tts', 'image', 'video'].map(pick).join('') +
           '</div>',
       ) +
       btn('save', '保存配置')
@@ -253,6 +328,7 @@ function render() {
       readWebPage: '读取网页正文、配图和视频',
       analyzeMedia: '图片与视频理解',
       generateImage: '生图与改图',
+      generateVideo: '生成视频',
       resolveAudioSource: '获取公开音乐音源',
       editAudio: '音频剪辑',
       downloadResource: '下载公开素材',

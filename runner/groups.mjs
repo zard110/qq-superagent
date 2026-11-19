@@ -163,6 +163,15 @@ export function submitGroup(job) {
     })
   return { state: 'running', progress: entry.progress }
 }
+export function cancelGroup(job) {
+  const status=groupStatus(job)
+  if(status.state==='running'){
+    const entry=jobs.get(identity(job))
+    entry.cancelled=true
+    entry.child?.kill()
+  }
+  return {state:status.state}
+}
 export function acknowledgeGroup(job) {
   const status = groupStatus(job)
   if (status.state === 'finished') jobs.delete(identity(job))
@@ -179,9 +188,11 @@ async function groupTurn(job, entry) {
     const name = await locked(() => ensure(group))
     await docker('exec', name, 'node', '/opt/harness/worker.mjs', 'prune')
     idle.delete(group)
+    if(entry.cancelled) throw Error('任务已停止')
     const child = spawn('docker', ['exec', '-i', name, 'node', '/opt/harness/worker.mjs'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
+    entry.child=child
     const chunks = []
     let size = 0
     child.stdout.on('data', (b) => {

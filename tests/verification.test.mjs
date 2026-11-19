@@ -10,6 +10,18 @@ import { key } from '../app/messages.mjs'
 import { sharedArticle, inspectArticle } from '../app/articles.mjs'
 import { parseDocument } from '../app/network.mjs'
 
+test('普通提问首轮返回空正文时补答一次，只投递最终回复', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'qq-empty-')), s = new Store(':memory:')
+  t.after(() => { s.db.close(); rmSync(dir, {recursive:true, force:true}) })
+  s.put('config','main',{...s.config(),providers:{chat:{base:'http://unused',model:'fixture'}}})
+  let calls = 0
+  const r = new Runtime(s,new Capabilities(s,dir),{model:async()=>({role:'assistant',content:++calls===1?null:'四'})})
+  const m = r.receive('GROUP_AT_MESSAGE_CREATE',{id:'q',group_openid:'g',author:{id:'u'},content:'二加二等于几'})
+  await r.process(s.get('run',key('g',m.id)))
+  assert.equal(calls,2)
+  assert.deepEqual(s.all('out').map(o=>o.text),['四'])
+})
+
 test('模型搜索后遗漏阅读时由运行时打开结果，避免反复催促失败', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'qq-read-')),
     s = new Store(':memory:'),

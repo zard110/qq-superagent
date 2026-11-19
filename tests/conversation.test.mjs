@@ -5,6 +5,52 @@ import { Runtime } from '../app/runtime.mjs'
 import { key } from '../app/messages.mjs'
 import { decideConversation } from '../app/conversation.mjs'
 
+test('制作期间单独补 @ 不再派单，有新增要求或事后再次询问时正常处理', async (t) => {
+  const store = new Store(':memory:')
+  t.after(() => store.db.close())
+  store.put('config', 'main', {...store.config(), providers:{chat:{base:'http://unused',model:'fixture'}}})
+  const at='2026-11-19T04:07:09.000Z'
+  const m={id:'req',idx:'req',group:'g',author:'a',at,thread:'video',parts:[],refs:[],text:'制作短剧'}
+  const prev=key(m.group,m.id)
+  store.put('run',prev,{id:prev,state:'done',m,ticket:'work',artifact:'movie'})
+  const before='2026-11-19T04:07:14.000Z', after='2026-11-19T04:10:04.000Z'
+  const media=key(key(prev,'reply'),'media')
+  store.put('out',media,{at:Date.parse(after)-1000,status:'sent'})
+  const model=async()=>({content:JSON.stringify({action:'continue',candidate:0,goal:'work',requiresFile:true})})
+  for(const [timestamp,text,nudge] of [[before,'<@bot> ',true],[before,'<@bot> 换一首配乐',false],[after,'<@bot>',false]]) {
+    const run={id:'next',m:{...m,id:'ping',text,at:timestamp,mention:true,mentions:[{id:'bot',self:true}]}}
+    const route=await decideConversation({store,model},run)
+    assert.equal(route.acknowledgmentOf,nudge?prev:undefined)
+    if(nudge) assert.equal(route.requiresFile,false)
+  }
+})
+
+test('技能安装只汇报执行结果，另行索要文件仍须交付', async (t) => {
+  const store = new Store(':memory:')
+  t.after(() => store.db.close())
+  store.put('config', 'main', {
+    ...store.config(),
+    providers: { chat: { base: 'http://unused', model: 'fixture' } },
+  })
+  const m = { group: 'group', id: 'previous', author: 'member', at: new Date().toISOString(),
+    text: '安装这个技能库', thread: 'install', refs: [], parts: [] }
+  store.put('run', 'previous', { id: 'previous', state: 'done', m, ticket: 'existing-session' })
+  for (const [text, goal, needsFile] of [
+    ['继续安装技能', 'setup', false],
+    ['安装后把使用说明整理成文档发给我', 'document', true],
+    ['帮我打包这个技能并发给我', 'work', true],
+  ]) {
+    const route = await decideConversation({
+      store, model: async () => ({ content: JSON.stringify({
+        action: 'continue', candidate: 0, goal, requiresFile: true,
+      }) }),
+    }, { id: 'current', m: { ...m, id: 'current', text } })
+    assert.equal(route.action, 'continue')
+    assert.equal(route.session, 'existing-session')
+    assert.equal(route.requiresFile, needsFile)
+  }
+})
+
 test('引用旧作品时保留版本，独立请求分叉，候选按群隔离', async (t) => {
   const s = new Store(':memory:')
   t.after(() => s.db.close())
@@ -58,6 +104,21 @@ test('引用旧作品时保留版本，独立请求分叉，候选按群隔离',
   assert.equal(firstTask.action, 'new')
   assert.equal(firstTask.source, 'reply')
 })
+test('明确要求安静的消息只记入历史，重复的 @ 事件不会触发回答，下一条照常处理', (t) => {
+  const s = new Store(':memory:')
+  t.after(() => s.db.close())
+  const r = new Runtime(s, {})
+  const event = {group_openid:'g', id:'quiet', author:{id:'a'}, content:'<@bot> 你先别说话'}
+  r.receive('GROUP_MESSAGE_CREATE', event)
+  r.receive('GROUP_AT_MESSAGE_CREATE', event)
+  r.receive('GROUP_AT_MESSAGE_CREATE', {...event,id:'quiet2',content:'<@bot> 闭嘴'})
+  assert.ok(s.lookup('g','quiet'))
+  assert.equal(s.all('run').length,0)
+  assert.equal(s.all('out').length,0)
+  r.receive('GROUP_AT_MESSAGE_CREATE', {...event,id:'next',content:'你现在可以说话了'})
+  assert.equal(s.all('run').length,1)
+})
+
 test('等待答复按发言人保存，其他人的插话不会取走等待记录', (t) => {
   const s = new Store(':memory:')
   t.after(() => s.db.close())

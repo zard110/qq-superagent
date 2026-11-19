@@ -1,3 +1,18 @@
+export function pagePhotos(page, originalsOnly = false) {
+  const cached = new Map((page.browserImages || []).map(({position, resource}) => [position, resource]))
+  const choices = new Map((page.images || []).map((id,i) => [i+1,id]))
+  if (!originalsOnly) for (const [position, resource] of cached) choices.set(position,resource)
+  return [...choices].map(([position, resource]) => ({position,resource}))
+}
+
+export function photoPageAllowed(page, site, question = '') {
+  if (site !== 'instagram.com') return true
+  let host
+  try { host = new URL(page).hostname.toLowerCase() } catch { return false }
+  return /(^|\.)instagram\.com$/.test(host) ||
+    (/\b(?:x|twitter)\b|推特/i.test(question) && /(^|\.)(?:x|twitter)\.com$/.test(host))
+}
+
 export function instagramPost(value) {
   try {
     const u = new URL(value)

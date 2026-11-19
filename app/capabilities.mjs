@@ -8,6 +8,7 @@ import { settings, selectedProvider } from './providers.mjs'
 import * as deepseek from './deepseek.mjs'
 import { publicShareLink, publicShareText } from './articles.mjs'
 import { searchMemory } from './memory.mjs'
+import { beefMedia } from './beeftv.mjs'
 const str = { type: 'string' }
 const definitions = {
   recognizeText: ['提取图片或 PDF 中的原文，按页返回', { resource: str }],
@@ -39,7 +40,11 @@ const definitions = {
   ],
   generateImage: [
     '生成图片或根据指定参考素材改图，仅在用户要求创作时调用',
-    { prompt: str, resource: str },
+    { prompt: str, resource: str, resources: {type:'array',items:str,maxItems:10}, ratio:str },
+  ],
+  generateVideo: [
+    '按用户明确给的4至15整数秒生成480p视频。可多图全能参考，用户要求声音时启用音轨。',
+    {prompt:str, seconds:{type:'integer',minimum:4,maximum:15}, ratio:str, audio:{type:'boolean'}, resources:{type:'array',items:str,maxItems:9}},
   ],
   scheduleReminder: [
     '按群管理员的明确请求创建提醒，at 使用含时区的未来 ISO 时间，interval 为 once/daily/weekly',
@@ -90,6 +95,7 @@ export const toolSpecs = Object.entries(definitions).map(([name, [description, p
           readWebPage: ['url'],
           searchWeb: ['query'],
           generateImage: ['prompt'],
+          generateVideo: ['prompt','seconds'],
           runCode: ['code'],
           downloadResource: ['url'],
           resolveAudioSource: ['url'],
@@ -106,6 +112,7 @@ const expected = {
   synthesizeSpeech: 'tts',
   searchWeb: 'search',
   generateImage: 'image',
+  generateVideo: 'video',
   runCode: 'Docker',
   editAudio: 'Docker',
   resolveAudioSource: '公开音源',
@@ -135,6 +142,7 @@ export class Capabilities {
           searchWeb: '候选来源列表',
           analyzeMedia: '发现与读取范围',
           generateImage: '群内产物句柄',
+          generateVideo: '群内视频产物',
           recognizeText: '逐页原文',
           synthesizeSpeech: '群内语音产物',
           scheduleReminder: '触发计划',
@@ -146,7 +154,7 @@ export class Capabilities {
         media:
           name === 'analyzeMedia'
             ? ['image/*', 'video/*']
-            : name === 'generateImage'
+            : ['generateImage','generateVideo'].includes(name)
               ? ['image/*']
               : name === 'editAudio'
                 ? ['audio/*', 'video/*']
@@ -222,7 +230,19 @@ export class Capabilities {
     const r = this.store.get('resource', id)
     if (!r || r.group !== g) throw Error('本群找不到此素材，请重新发送')
     if (!r.local) {
-      const { bytes, mime } = await publicFile(r.url, 32 * 1024 * 1024)
+      let downloaded
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          downloaded = await this.download(r.url, 32 * 1024 * 1024)
+          break
+        } catch (error) {
+          const transient = /aborted|timeout|timed out|reset|socket hang up|premature close|HTTP (429|5..)/i.test([error.name,error.code,error.message].join(' '))
+          if (!transient) throw error
+          if (attempt === 2) throw Error('已收到素材，但连续三次下载中断，未取得完整文件')
+          await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)))
+        }
+      }
+      const { bytes, mime } = downloaded
       if (r.mime === 'video/*') {
         if (!/^video\//.test(mime)) throw Error('网页播放器未提供可读取的视频文件')
         r.mime = mime
@@ -461,8 +481,9 @@ export class Capabilities {
       return result(pages, [m.id, a.resource])
     }
     if (name === 'synthesizeSpeech') {
-      if (!ctx.adminTest && (ctx.social || !/朗读|语音|念给|读给|读出来|配音/.test(m.text)))
+      if (!ctx.adminTest && (ctx.social || (!ctx.mediaItem && !/朗读|语音|念给|读给|读出来|配音/.test(m.text))))
         throw Error('请明确要求朗读或发送语音')
+      if (provider(config,'tts').kind === 'beeftv') return result(await beefMedia(this,ctx,'tts',a,Pending),[m.id])
       const audio = await deepseek.synthesize(provider(config, 'tts'), a.text, a.voice)
       return result({ artifact: this.save(m.group, 'audio/wav', audio) }, [m.id])
     }
@@ -528,7 +549,8 @@ export class Capabilities {
           this.store.put('resource', id, { id, group: m.group, mime: 'video/*', url })
         return id
       })
-      await this.inspectPageMedia(page, ctx)
+      if (!ctx.pickingPhotos || (ctx.photoPage && page.images.length > 1))
+        await this.inspectPageMedia(page, ctx)
       if (page.status !== 'read')
         page.card = this.reference(m).parts.find((p) => p.type === 'card' && p.url === url)
       return { ...result(page, [url], page.status), provider: reader }
@@ -538,6 +560,18 @@ export class Capabilities {
       const q = String(a.query || '').slice(0, 350)
       if (!q || /https?:\/\/|(?:rkey|auth_token)=|[A-Fa-f0-9]{32}/.test(q))
         throw Error('搜索词请只使用公开关键词')
+      if (p.kind === 'browser') {
+        const domain=String(a.domain||'').trim()
+        if(domain && !/^[a-z0-9.-]+$/i.test(domain))throw Error('无效的检索域名')
+        const search=new URL('https://www.bing.com/search')
+        search.searchParams.set('q',q+(domain?' site:'+domain:''))
+        const freshness={day:'ez1',week:'ez2',month:'ez3',year:'ez5'}[a.timeRange]
+        if(freshness)search.searchParams.set('filters','ex1:"'+freshness+'"')
+        const page=await readPage(search.href)
+        const hits=(page.resultLinks||[]).filter(hit=>!domain || new URL(hit.url).hostname===domain || new URL(hit.url).hostname.endsWith('.'+domain))
+        if(!hits.length)throw Error('搜索页未返回可读取的结果链接')
+        return result(hits,hits.map(hit=>hit.url))
+      }
       if (p.kind === 'deepseek') {
         const includeContent =
           a.includeContent === true &&
@@ -608,6 +642,10 @@ export class Capabilities {
         (a.inputs || []).map((i) => i.resource),
         output.exit === 0 ? 'ok' : 'failed',
       )
+    }
+    if (name === 'generateVideo' || (name === 'generateImage' && provider(config,'image').kind === 'beeftv')) {
+      if (!ctx.worker || ctx.social) throw Error('生成作品需要群友明确交办')
+      return result(await beefMedia(this,ctx,name === 'generateVideo' ? 'video' : 'image',a,Pending))
     }
     if (name === 'generateImage') {
       if (!ctx.worker || ctx.social) throw Error('生成作品需要群友明确发起的任务')

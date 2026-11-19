@@ -17,7 +17,7 @@ export async function publicFile(input, limit = 2_000_000, redirects = 4, docume
         agent: false,
         autoSelectFamily: false,
         lookup: (name, opts, cb) => cb(null, ip.address, ip.family),
-        signal: AbortSignal.timeout(25_000),
+        signal: AbortSignal.timeout(limit >= 24 * 1024 * 1024 ? 60_000 : 25_000),
         headers: {
           'user-agent': document
             ? 'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36'
@@ -90,6 +90,28 @@ export async function readPage(url) {
 }
 export function parseDocument(html, url) {
   const $ = load(html)
+  const resultLinks = []
+  const host = new URL(url).hostname
+  if (/(^|\.)bing\.com$/.test(host) && new URL(url).pathname === '/search') {
+    for(const row of $('.b_algo').toArray()) {
+      try {
+        const item=$(row)
+        const headline=item.find('h2 a, a:has(h2), .b_title a').first()
+        const node=headline.length?headline:item.find('a[href]').filter((_,el)=>!$(el).hasClass('tilk') && $(el).text().trim().length>5).first()
+        if (!node.attr('href'))continue
+        const href=new URL(node.attr('href'),url)
+        let destination=href.href
+        if (/(^|\.)bing\.com$/.test(href.hostname) && href.pathname==='/ck/a') {
+          const encoded=href.searchParams.get('u')
+          if (!encoded?.startsWith('a1'))continue
+          destination=Buffer.from(encoded.slice(2),'base64url').toString('utf8')
+        }
+        const parsed=new URL(destination)
+        if(!['https:','http:'].includes(parsed.protocol)||parsed.username||parsed.password||resultLinks.some(r=>r.url===parsed.href))continue
+        resultLinks.push({title:node.text().trim().slice(0,200),url:parsed.href,snippet:node.closest('.b_algo').find('p').first().text().trim().slice(0,500)})
+      } catch {}
+    }
+  }
   const schemas = $('script[type="application/ld+json"]')
     .toArray()
     .flatMap((el) => {
@@ -193,6 +215,7 @@ export function parseDocument(html, url) {
   return {
     title,
     url,
+    ...(resultLinks.length && !restricted && {resultLinks:resultLinks.slice(0,10)}),
     images: restricted ? [] : images.slice(0, 30),
     videos: restricted ? [] : videos.slice(0, 10),
     videoCount: restricted ? 0 : Math.max(players.length, videos.length),
@@ -217,11 +240,12 @@ export async function remote(url, options = {}) {
 }
 export { requireProvider as provider } from './providers.mjs'
 export const auth = (p) => (p.key ? { Authorization: 'Bearer ' + p.key } : {})
-export async function chat(p, messages, tools) {
+export async function chat(p, messages, tools, signal) {
   const data = await remote(p.base.replace(/\/$/, '') + '/chat/completions', {
     method: 'POST',
+    ...(signal && { signal }),
     headers: { ...auth(p), 'content-type': 'application/json' },
-    body: JSON.stringify({ model: p.model, messages, ...(tools?.length ? { tools } : {}) }),
+    body: JSON.stringify({ model: p.model, messages, ...(p.effort ? { reasoning_effort: p.effort } : {}), ...(tools?.length ? { tools } : {}) }),
   })
   if (!data.choices?.[0]?.message) throw Error('模型响应缺少消息')
   return data.choices[0].message

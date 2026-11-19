@@ -6,12 +6,14 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { Store, persona } from './store.mjs'
 import { Capabilities, Pending } from './capabilities.mjs'
-import { Runtime } from './runtime.mjs'
+import { GroupRuntime as Runtime } from './group-runtime.mjs'
 import { QQ } from './qq.mjs'
 import { startGateway, executeHarness } from './harness.mjs'
 import { key } from './messages.mjs'
 import { publicShareLink } from './articles.mjs'
-import { settings, selectedProvider } from './providers.mjs'
+import { settings, selectedProvider, compatibleEndpoint } from './providers.mjs'
+import { classify } from './fast-routing.mjs'
+import { chat } from './network.mjs'
 
 const dir = resolve(process.env.STATE_DIR || 'state')
 mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -33,7 +35,8 @@ function publicConfig() {
   const c = store.config()
   const profile = settings(c)
   c.routes = profile.routes
-  c.vendors = { deepseek: { key: profile.vendors.deepseek.key ? '••••' : '' } }
+  c.vendors = profile.vendors
+  for (const vendor of Object.values(c.vendors)) vendor.key = vendor.key ? '••••' : ''
   if (c.qq.secret) c.qq.secret = '••••'
   for (const p of Object.values(c.providers)) if (p.key) p.key = '••••'
   return c
@@ -56,7 +59,24 @@ function save(c) {
   c.vendors ??= previous.vendors
   if (typeof c.vendors.deepseek?.key !== 'string') throw Error('供应商配置格式不正确')
   if (c.vendors.deepseek.key === '••••') c.vendors.deepseek.key = previous.vendors.deepseek.key
+  c.vendors.beeftv ??= previous.vendors.beeftv
+  if (typeof c.vendors.beeftv.key !== 'string') throw Error('BeefTV Key 格式错误')
+  if (c.vendors.beeftv.key === '••••') c.vendors.beeftv.key = previous.vendors.beeftv.key
+  for (const role of ['openai','quick']) {
+    const prior = previous.vendors[role]
+    const vendor = c.vendors[role] ??= { ...prior }
+    if (![vendor.base, vendor.key, vendor.model, vendor.effort].every(v => typeof v === 'string')) throw Error('聊天接口配置格式不正确')
+    Object.assign(vendor, compatibleEndpoint(vendor, prior))
+    vendor.model = vendor.model.trim()
+    if (!['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(vendor.effort)) throw Error('无效的思考强度')
+  }
+  const jev = c.vendors.jev ??= { ...previous.vendors.jev }
+  if (typeof jev.enabled !== 'boolean' || ![jev.base,jev.key,jev.model].every(v=>typeof v === 'string')) throw Error('Jev 配置格式不正确')
+  Object.assign(jev, compatibleEndpoint(jev, previous.vendors.jev))
+  if (jev.enabled && (!jev.key.trim() || !jev.model.trim() || !c.vendors.quick.model))
+    throw Error('启用路由前请先保存简单模型，并填写 Jev 模型和 Key')
   c.routes ??= previous.routes
+  if (Object.values(c.routes).includes('openai') && !c.vendors.openai.model) throw Error('请填写 OpenAI 模型名')
   const vision = selectedProvider(c, 'vision')
   if (c.routes.vision === 'follow' && vision?.kind === 'deepseek' && vision.model !== 'deepseek-flash')
     throw Error('主模型不支持图像输入，请将「图像理解」设为 Flash')
@@ -72,7 +92,10 @@ function save(c) {
   for (const g of Object.values(c.groups))
     if (!['quiet', 'social', 'rules'].includes(g.mode) || !Array.isArray(g.rules))
       throw Error('群策略格式错误')
-  store.put('config', 'main', c)
+  store.atomic(()=>{
+    store.put('config', 'main', c)
+    app.policyUpdated(old,c)
+  })
   if (JSON.stringify(old.qq) !== JSON.stringify(c.qq)) qq.reset()
   return publicConfig()
 }
@@ -82,7 +105,7 @@ function schedules() {
     if (t.enabled && t.next <= now)
       store.atomic(() => {
         const id = key(t.id, t.next)
-        app.enqueue(id, t.group, '', t.text)
+        app.scheduled(t, id)
         if (t.every) t.next += t.every * (1 + Math.floor((now - t.next) / t.every))
         else t.enabled = false
         store.put('schedule', t.id, t)
@@ -135,6 +158,7 @@ const server = http.createServer(async (req, res) => {
             state: r.progress?.recovering && r.state === 'running' ? 'recovering' : r.state,
             ticket: r.ticket,
             answer: r.answer,
+            fast: r.fast,
           })),
         deliveries: store.all('out').slice(0, 50),
         schedules: store.all('schedule'),
@@ -154,13 +178,44 @@ const server = http.createServer(async (req, res) => {
       return
     }
     const body = await payload(req)
+    if (path === '/api/test-routing') {
+      const vendors = settings(store.config()).vendors
+      const started = Date.now()
+      if (body.role === 'quick') {
+        if (!vendors.quick.model) throw Error('请先保存简单模型')
+        const msg = await chat(vendors.quick,[{role:'user',content:'请只回答 OK'}],undefined,AbortSignal.timeout(12000))
+        if (!msg.content?.trim()) throw Error('简单模型未返回正文')
+        return json({answer:msg.content.trim().slice(0,200),ms:Date.now()-started})
+      }
+      if (body.role !== 'jev' || !vendors.jev.key) throw Error('请先保存 Jev 密钥')
+      const result = await classify(vendors.jev,{current:{speaker:'成员1',text:'公路车 54 码是什么意思？',attachments:[]},history:[],quotes:[],addressedToBot:true,waiting:false})
+      return json({...result,ms:Date.now()-started})
+    }
+    if (path === '/api/models') {
+      const role = body.role === 'quick' ? 'quick' : 'openai'
+      const { base, key } = compatibleEndpoint(body, settings(store.config()).vendors[role])
+      const response = await fetch(base + '/models', {
+        headers: key ? { Authorization: 'Bearer ' + key } : {},
+        redirect: 'error', signal: AbortSignal.timeout(12000),
+      })
+      if (!response.ok) throw Error('模型列表读取失败（HTTP ' + response.status + '）')
+      const list = (await response.json()).data
+      if (!Array.isArray(list)) throw Error('接口未返回模型列表')
+      return json({models:[...new Set(list.map(item => item?.id).filter(id => typeof id === 'string' && id.trim()))].sort()})
+    }
     if (path === '/api/run') {
       const run = store.get('run', String(body.id))
       if (!run) throw Error('找不到任务')
+      const disposition=store.triggers.disposition(run.trigger || run.id)
+      const decision=disposition?.decisionId && store.decisions.get(disposition.decisionId)
+      const ticket=run.ticket && store.tickets.get(run.ticket)
+      const assignment=ticket?.assignments.find(a=>a.id===run.assignment)
       return json({
+        lifecycle:run.flow ? {decision:decision?.kind,subscribed:!!run.subscribed,assignment:assignment?.state,report:assignment?.report?.state,outcome:ticket?.ended?.outcome} : undefined,
         state: run.state,
         progress: run.progress,
         executor: run.executor || 'legacy',
+        fast: run.fast,
         route: run.route,
         ticket: run.ticket,
         steps: store
@@ -194,10 +249,11 @@ const server = http.createServer(async (req, res) => {
     if (path === '/api/resume') {
       const prior = store.get('run', String(body.id)),
         request = String(body.question || '').trim()
-      if (!prior?.ticket || prior.executor !== 'harness' || !request || prior.state !== 'failed')
+      if (!prior?.ticket || prior.executor !== 'harness' || !request || !['failed','partial'].includes(prior.state))
         throw Error('需要失败的 Harness Ticket 和续办指令')
       const id = key(prior.id, 'resume', request)
-      if (!store.get('run', id))
+      if (prior.flow) app.resume(prior,request,id)
+      else if (!store.get('run', id))
         store.put('run', id, {
           id,
           m: { ...prior.m, text: request },
@@ -346,7 +402,8 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ detail: e.message }))
   }
 })
-const archiveTick = () => void archive.tick().catch((e) => console.error('群记忆调度失败', e.message))
+app.archive = job => archive.archive(job)
+const archiveTick = () => void archive.tick(Date.now(),job=>app.archiveDue(job)).catch((e) => console.error('群记忆调度失败', e.message))
 archiveTick()
 const archiveTimer = setInterval(archiveTick, 15000)
 const interval = setInterval(() => {

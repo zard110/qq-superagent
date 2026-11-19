@@ -73,3 +73,18 @@ test('official tools use shared credentials and documented request and response 
   assert.equal((await deepseek.synthesize(p, '大家好', 'tide')).length, 16)
   assert.equal(paths.length, 5)
 })
+
+test('OpenAI compatible endpoint serves the selected roles with configured reasoning', async (t) => {
+  const c = { routes: { chat: 'openai', worker: 'follow', vision: 'openai' },
+    vendors: { openai: { base: 'https://example.test/v1', model: 'custom', key: 'fixture', effort: 'medium' } } }
+  const p = requireProvider(c, 'chat')
+  for (const role of ['worker', 'vision']) assert.deepEqual(requireProvider(c, role), p)
+  const { chat } = await import('../app/network.mjs')
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(url, 'https://example.test/v1/chat/completions')
+    assert.equal(options.headers.Authorization, 'Bearer fixture')
+    assert.equal(JSON.parse(options.body).reasoning_effort, 'medium')
+    return Response.json({ choices: [{ message: { content: 'ok' } }] })
+  })
+  assert.equal((await chat(p, [{role:'user',content:'ping'}])).content, 'ok')
+})

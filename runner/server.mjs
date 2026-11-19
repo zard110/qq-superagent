@@ -1,14 +1,14 @@
 import http from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { submitGroup, pollGroup, acknowledgeGroup, installDeb, recoverGroups } from './groups.mjs'
+import { submitGroup, pollGroup, acknowledgeGroup, cancelGroup, installDeb, recoverGroups } from './groups.mjs'
 await recoverGroups()
 let active = 0
 http
   .createServer(async (req, res) => {
     if (
       req.method !== 'POST' ||
-      !['/', '/group', '/group/status', '/group/ack', '/install-deb'].includes(req.url)
+      !['/', '/group', '/group/status', '/group/ack', '/group/cancel', '/install-deb'].includes(req.url)
     ) {
       res.writeHead(404).end()
       return
@@ -37,7 +37,7 @@ http
               ? await pollGroup(payload)
               : req.url === '/group/ack'
                 ? acknowledgeGroup(payload)
-                : await installDeb(payload)
+                : req.url === '/group/cancel' ? cancelGroup(payload) : await installDeb(payload)
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(result))
         return

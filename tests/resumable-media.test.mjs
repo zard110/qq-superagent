@@ -24,6 +24,46 @@ function setup(t) {
   return { store, caps: new Capabilities(store, dir) }
 }
 
+test('主页可直接选择已读取的配图，worker 未复制原图时也只交付图片', async (t) => {
+  const runtime = setup(t), { store, caps } = runtime
+  const page = 'https://www.instagram.com/cyclist/'
+  const resource = caps.save('g', 'image/jpeg', Buffer.from('image'))
+  const config = store.config()
+  config.providers.worker = {model:'test',base:'http://unused'}
+  store.put('config','main',config)
+  const m = { id:'q', group:'g', author:'a', text:'搜 ins 上的骑行图', parts:[], refs:[], thread:'t' }
+  const run = {id:key('photo'),m,ticket:'photo',route:{goal:'photos',sourceSite:'instagram.com'},state:'running'}
+  store.put('run',run.id,run)
+  caps.register({spec:{function:{name:'readWebPage'}}, execute: async () => ({
+    status:'read', sources:[page], data:{images:['download-url'],browserImages:[{position:1,resource}]}
+  })})
+  let ready = false
+  const original = globalThis.fetch
+  t.mock.method(globalThis,'fetch',(url,opts) => {
+    if (!String(url).startsWith((process.env.RUNNER_URL || 'http://runner:8090')+'/group')) return original(url,opts)
+    return Promise.resolve(Response.json({state:ready?'finished':'running',result:{photos:[],text:'无原图'}}))
+  })
+  const tick = () => executeHarness(runtime,run,{parts:[]})
+  await assert.rejects(tick,Pending)
+  const gateway = startGateway(runtime,0)
+  await once(gateway,'listening')
+  t.after(()=>gateway.close())
+  const call = async (name,args) => {
+    const res=await original('http://127.0.0.1:'+gateway.address().port+'/task/'+name,{
+      method:'POST',headers:{authorization:'Bearer '+store.get('workerLease',run.id).token},
+      body:JSON.stringify({args}),
+    })
+    return res.json()
+  }
+  const read = await call('readWebPage',[page])
+  assert.deepEqual(read.data.photoDownloads[0].args,[page,resource])
+  assert.equal((await call('fetchImage',[page,resource])).resource,resource)
+  ready=true
+  const result=await tick()
+  assert.deepEqual(result.artifacts,[resource])
+  assert.equal(result.text,'')
+})
+
 test('网页只取正文媒体和原帖声明的配图，视觉失败保留可用帧和序号', async (t) => {
   const { store, caps } = setup(t)
   const page = parseDocument(
@@ -90,7 +130,7 @@ test('超过 36 次调用，停滞后用相同会话和凭证恢复一次，已�
     server.close()
   })
   store.put('config', 'main', { ...store.config(), providers: { worker: { model: 'test', base } } })
-  const m = { id: 'q', group: 'g', author: 'a', text: '继续原稿', parts: [], refs: [], thread: 'thread' }
+  const m = { id: 'q', group: 'g', author: 'a', text: '继续修改草稿', parts: [], refs: [], thread: 'thread' }
   m.at = '2026-11-19T08:00:00+08:00'
   const entry = (group) =>
     JSON.stringify([

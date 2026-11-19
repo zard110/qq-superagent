@@ -1,19 +1,31 @@
 export const officialBase = 'https://api.deepseek.com'
+export function compatibleEndpoint(vendor, prior) {
+  const endpoint = new URL(vendor.base.trim())
+  if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)
+    throw Error('请填写有效的 API 基址')
+  if (vendor.key === '••••' && new URL(prior.base).origin !== endpoint.origin)
+    throw Error('更换 API 主机后请重新填写对应的 Key')
+  return { base: endpoint.href.replace(/\/+$/, '').replace(/\/chat\/completions$/, ''), key: vendor.key === '••••' ? prior.key : vendor.key }
+}
 const flash = 'deepseek-flash',
   pro = 'deepseek-v4-pro'
-const modelRoutes = [flash, pro]
+const modelRoutes = [flash, pro, 'openai']
 const roles = {
-  chat: ['主模型', modelRoutes],
+  chat: ['负责模型', modelRoutes],
   worker: ['子 Agent', ['follow', ...modelRoutes]],
-  vision: ['图像理解', [flash, 'follow', 'off']],
-  search: ['网页搜索', ['official', 'off']],
+  vision: ['图像理解', [flash, 'openai', 'follow', 'off']],
+  search: ['网页搜索', ['official','browser', 'off']],
   fetch: ['网页读取', ['auto', 'official', 'local', 'off']],
+  video: ['视频生成', ['off', 'beeftv']],
   speech: ['音轨转写', ['official', 'off']],
   ocr: ['文字识别', ['official', 'off']],
-  tts: ['语音合成', ['official', 'off']],
-  image: ['图像生成', ['off']],
+  tts: ['语音合成', ['official', 'off', 'beeftv']],
+  image: ['图像生成', ['off', 'beeftv']],
 }
 const labels = {
+  browser: '公开网页搜索（移动浏览器）',
+  beeftv: 'BeefTV',
+  openai: 'OpenAI / 兼容接口',
   follow: '跟随主模型',
   official: 'DeepSeek 官方',
   local: '仅移动浏览器读取（Docker）',
@@ -62,14 +74,20 @@ export function settings(c) {
       ]),
     }
   }
-  return { routes, catalog, vendors: { deepseek: { key } } }
+  const openai = { base: 'https://api.openai.com/v1', model: '', key: '', effort: '', ...c.vendors?.openai }
+  const quick = c.vendors?.quick ? { ...c.vendors.quick } : { ...openai, model: '', effort: '' }
+  const jev = { base:'https://api.apikey.fan/v1/systemone', key:'', model:'jev-latest', enabled:false, ...c.vendors?.jev }
+  return { routes, catalog, vendors: { deepseek: { key }, beeftv: {key: c.vendors?.beeftv?.key || ''}, openai, quick, jev } }
 }
 export function selectedProvider(c, role) {
   if (!Object.hasOwn(roles, role)) return
   const { routes, vendors } = settings(c),
     choice = routes[role]
   if (choice === 'follow' && ['worker', 'vision'].includes(role)) return selectedProvider(c, 'chat')
+  if (choice === 'beeftv' && roles[role][1].includes(choice)) return {kind:'beeftv', base:'https://beeftv.app/v1',key:vendors.beeftv.key}
+  if (choice === 'openai' && ['chat', 'worker', 'vision'].includes(role)) return { ...vendors.openai, kind: 'openai' }
   if (choice === 'legacy') return c.providers[role]
+  if (role === 'search' && choice === 'browser') return {kind:'browser',base:'Browser'}
   if (choice === 'local' || (choice === 'auto' && !vendors.deepseek.key))
     return { kind: 'local', base: 'HTTP' }
   if (choice === 'off') return

@@ -1,6 +1,6 @@
 #!/usr/local/bin/node
-const fs = require('node:fs')
-const { execFileSync } = require('node:child_process')
+import fs from 'node:fs'
+import { execFileSync } from 'node:child_process'
 async function main() {
   const [op, ...args] = process.argv.slice(2)
   if (op === 'install-skill' && args.length === 1) {
@@ -10,6 +10,10 @@ async function main() {
   if (
     ![
       'install-deb',
+      'fetch-skill',
+      'media',
+      'call',
+      'resource',
       'searchWeb',
       'readWebPage',
       'fetchImage',
@@ -19,16 +23,41 @@ async function main() {
     !args.length
   )
     throw Error(
-      'qq-tool install-deb PACKAGE | searchWeb QUERY | readWebPage URL | searchGroupMemory JSON | searchHistory JSON | fetchImage POST_URL IMAGE_HANDLE_OR_MEDIA_URL',
+      'qq-tool fetch-skill OWNER/REPO | install-skill DIRECTORY | install-deb PACKAGE | searchWeb QUERY | readWebPage URL | searchGroupMemory JSON | searchHistory JSON | fetchImage POST_URL IMAGE_HANDLE_OR_MEDIA_URL',
     )
   const token = fs.readFileSync('/tmp/qq-task-lease', 'utf8')
-  const response = await fetch('http://app:8790/task/' + op, {
+  const request = () => fetch('http://app:8790/task/' + op, {
     method: 'POST',
     headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
     body: JSON.stringify({ args }),
   })
-  const result = await response.json()
+  const response = await request()
+  let result = await response.json()
   if (!response.ok) throw Error(result.error || '请求失败')
+  if (op === 'media' || op === 'resource' || (op === 'call' && result.resource && typeof result.data==='string')) {
+    while (result.pending) {
+      await new Promise(done => setTimeout(done, 5000))
+      const poll = await request()
+      result = await poll.json()
+      if (!poll.ok) throw Error(result.error || '读取媒体任务状态失败')
+    }
+    if (result.data) {
+      if (!/^[a-f0-9]{32}$/.test(result.resource)) throw Error('无效的素材句柄')
+      const extension = {'image/jpeg':'jpg','image/png':'png','image/webp':'webp','video/mp4':'mp4',
+        'audio/mpeg':'mp3','audio/mp3':'mp3','audio/wav':'wav','audio/x-wav':'wav'}[result.mime] || 'bin'
+      const path = 'inputs/' + result.resource + '.' + extension
+      fs.mkdirSync('inputs', {recursive:true})
+      fs.writeFileSync(path, Buffer.from(result.data, 'base64'))
+      console.log(JSON.stringify({resource:result.resource,path,mime:result.mime}))
+    } else console.log(JSON.stringify(result))
+    return
+  }
+  if (op === 'fetch-skill') {
+    execFileSync('python3', ['/opt/harness/unpack_skills.py'], {
+      input: Buffer.from(result.data, 'base64'), stdio: ['pipe', 'inherit', 'inherit'],
+    })
+    return
+  }
   if (op === 'fetchImage') {
     const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[result.mime]
     if (!extension || !/^[a-f0-9]{32}$/.test(result.resource)) throw Error('无效的图片')

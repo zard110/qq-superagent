@@ -13,7 +13,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS group_members(g TEXT, id TEXT, name TEXT, role TEXT, bot INTEGER, at TEXT, username TEXT, PRIMARY KEY(g,id));
       CREATE INDEX IF NOT EXISTS member_name ON group_members(g,name);
       CREATE INDEX IF NOT EXISTS history ON messages(g,at);
-      CREATE TABLE IF NOT EXISTS daily_memory(g TEXT NOT NULL, day TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY(g,day));`)
+      CREATE TABLE IF NOT EXISTS daily_memory(g TEXT NOT NULL, day TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY(g,day));
+      CREATE TABLE IF NOT EXISTS group_cards(g TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(g,id));
+      CREATE INDEX IF NOT EXISTS card_status ON group_cards(g,status);`)
     this.depth = 0
     if (!this.get('migration', 'group-members-1'))
       this.atomic(() => {
@@ -202,6 +204,7 @@ export class Store {
     return this.db
       .prepare(
         `SELECT body FROM messages WHERE g=? AND at>=? AND at<=? AND id!=?
+         AND (at!=? OR rowid<coalesce((SELECT rowid FROM messages WHERE g=? AND id=?),9223372036854775807))
          AND (author!='@bot' OR id=coalesce(json_extract(body,'$.parts[0].source'),id))
          AND (?='' OR author=? OR (author!='@bot' AND json_extract(body,'$.nickname')=?)) AND (?='' OR thread=?)
          AND instr(lower(text),lower(?))>0 ORDER BY at DESC,rowid DESC LIMIT ?`,
@@ -210,6 +213,9 @@ export class Store {
         g,
         from,
         until,
+        excludeId,
+        until,
+        g,
         excludeId,
         author,
         author,
