@@ -1,7 +1,7 @@
 import { routingContext } from './dialogue.mjs'
 import { historyEnabled } from './memory.mjs'
 import { fetchSkillArchive } from './github-skill.mjs'
-import { workerMedia } from './worker-media.mjs'
+import { workerMedia, recoverMediaItems } from './worker-media.mjs'
 import http from 'node:http'
 import { instagramPost, isPostPhoto, pagePhotos, photoPageAllowed } from './photo-sources.mjs'
 import net from 'node:net'
@@ -31,21 +31,7 @@ async function body(req) {
   }
   return JSON.parse(Buffer.concat(chunks))
 }
-export function recoverMediaItems(store, current) {
-  const items = new Map(), seen = new Set()
-  const query = store.db.prepare("SELECT id,body FROM records WHERE bucket='mediaItem' AND json_extract(body,'$.run')=?")
-  for (let run = current; run && !seen.has(run.id); run = run.resumeOf && store.get('run',run.resumeOf)) {
-    if (run.ticket !== current.ticket || run.m.group !== current.m.group || run.m.id !== current.m.id) break
-    seen.add(run.id)
-    for (const row of query.all(run.id)) {
-      const {method,item} = JSON.parse(row.body), result = store.get('step',row.id)?.result
-      const id = key(method,item)
-      if (!items.has(id)) items.set(id,{method,item,status:result?.status || 'unknown',
-        resource:result?.data?.artifact || result?.data?.resource})
-    }
-  }
-  return [...items.values()]
-}
+
 
 export function startGateway(runtime, port = 8790) {
   // Rebind still queued/running requests before the scheduler starts polling.

@@ -4,7 +4,7 @@ import { Store } from '../app/store.mjs'
 import { GroupRuntime } from '../app/group-runtime.mjs'
 import { Pending } from '../app/capabilities.mjs'
 import { QQ } from '../app/qq.mjs'
-import { recoverMediaItems } from '../app/harness.mjs'
+import { recoverMediaItems } from '../app/worker-media.mjs'
 import { workerMedia } from '../app/worker-media.mjs'
 import { key } from '../app/messages.mjs'
 
@@ -98,6 +98,18 @@ test('中断恢复时，先对账在途镜头，不能换编号再次提交', as
     caps: { store: a.store, run: () => assert.fail('不应提交订单') },
   }
   await assert.rejects(() => workerMedia(grant, 'generateVideo', 'shot-retry', { seconds: 6 }), /原编号/)
+})
+test('恢复时已有供应商单号的镜头允许不同镜头并行，换编号重提同请求仍拦截', async t => {
+  const {store} = fixture(t)
+  const m = {group:'g',id:'q'}, ctx = {run:'retry',m}, grant = {ctx,lease:{recovering:true},
+    caps:{store,run:async () => {throw new Pending('等待镜头')}}}
+  const original={seconds:5,prompt:'开场'}
+  store.put('mediaItem','old',{run:'retry',method:'generateVideo',item:'opening',
+    fingerprint:key(Object.keys(original).sort().map(k=>[k,original[k]]))})
+  store.put('step','old',{result:{status:'pending'}})
+  store.put('paid',key('g','q','beeftv','video','opening'),{state:'submitted',receipt:{id:'provider-1'}})
+  await assert.rejects(workerMedia(grant,'generateVideo','renamed',original),/原编号/)
+  assert.deepEqual(await workerMedia(grant,'generateVideo','closing',{seconds:5,prompt:'收尾'}),{pending:true})
 })
 test('快答需要工具时在原 Ticket 上交给群 Agent', async (t) => {
   let called = 0
