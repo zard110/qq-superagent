@@ -15,7 +15,7 @@ license: MIT
 
 从剧本、视觉设定和分镜读取对应条目。需要人物一致时，先读取群友的实际参考照，再将人物、场景、道具资产用于分镜首帧，并把各镜首帧作为生成该镜视频的参考。按本次请求选择画幅、镜头数量、时长与对白。将分批清单保存在工作目录供自己核对，直接提交委托范围内的项目。
 
-在当前任务目录调用 \`qq-tool media TOOL ITEM JSON\`。TOOL 和可用参数见任务的 mediaTools 与 mediaUsage。为每个条目分配稳定的 ITEM，按返回的 resource 和本地路径衔接后续调用。按需使用 generateImage、generateVideo、synthesizeSpeech、resolveAudioSource。已成功的素材直接复用，已提交的项目按原编号查询。提交结果不明时保留记录。具体投产使用 QQ 网关的订单回执。
+在当前任务目录调用 \`qq-tool media TOOL ITEM JSON\`。TOOL 和可用参数见任务的 toolCatalog 与 mediaUsage。为每个条目分配稳定的 ITEM，按返回的 resource 和本地路径衔接后续调用。按需使用 generateImage、generateVideo、generateMusic、synthesizeSpeech、resolveAudioSource。已成功的素材直接复用，已提交的项目按原编号查询。提交结果不明时保留记录。具体投产使用 QQ 网关的订单回执。
 
 将取回的素材交给 short-drama-edit。按委托完成混音、剪辑和本地核对，将最终文件写入本轮交付目录。需要群友提供缺失的必要输入、或实际接口报错无法继续时，报告具体缺项与已完成部分。
 `

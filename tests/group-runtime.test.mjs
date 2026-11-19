@@ -239,6 +239,27 @@ test('明确引用的跨成员追问恢复原 Ticket，回复地址指向发起�
   assert.equal(a.store.all('decision').length, 1)
   assert.equal(a.store.get('out', key(r.id, 'reply')).origin, 'r')
 })
+test('纯工具执行者把仅有歌词的答复交回音乐模型，获得音频后才交付', async t => {
+  let calls=0
+  const a=fixture(t,{code:false,plan:async()=>({action:'new',audioIntent:'music',requiresFile:true}),
+    caps:{tools:()=>[{function:{name:'generateMusic'}}],run:async name=>{
+      assert.equal(name,'generateMusic')
+      a.store.put('resource','song',{group:'g',mime:'audio/mpeg'})
+      return {status:'ok',data:{artifact:'song'}}
+    }},
+    model:async()=>{
+      calls++
+      if (calls===1) return {content:'一段歌词'}
+      if (calls===2) return {tool_calls:[{id:'music-1',function:{name:'generateMusic',arguments:'{"prompt":"快节奏说唱"}'}}]}
+      return {content:'歌曲已完成'}
+    }})
+  a.send('song','创作一首 rap')
+  await a.process('song')
+  assert.equal(calls,3)
+  assert.equal(a.read('song').artifact,'song')
+  assert.equal(a.read('song').state,'done')
+})
+
 test('只开放产品工具的群也能查资料，按真实工具回执作答', async (t) => {
   const calls = []
   const a = fixture(t, {

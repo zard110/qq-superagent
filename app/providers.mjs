@@ -16,6 +16,7 @@ const roles = {
   vision: ['图像理解', [flash, 'openai', 'follow', 'off']],
   search: ['网页搜索', ['official','browser', 'off']],
   fetch: ['网页读取', ['auto', 'official', 'local', 'off']],
+  music: ['原创歌曲与配乐', ['off', 'beeftv']],
   video: ['视频生成', ['off', 'beeftv']],
   speech: ['音轨转写', ['official', 'off']],
   ocr: ['文字识别', ['official', 'off']],

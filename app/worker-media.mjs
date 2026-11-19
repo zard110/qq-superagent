@@ -1,14 +1,16 @@
+import { audioRequest } from './audio-models.mjs'
 import { key } from './messages.mjs'
 import { Pending } from './capabilities.mjs'
 
-const methods = new Set([
+export const mediaMethods = new Set([
   'analyzeMedia',
   'resolveAudioSource',
   'generateImage',
   'generateVideo',
+  'generateMusic',
   'synthesizeSpeech',
 ])
-const paid = new Set(['generateImage', 'generateVideo', 'synthesizeSpeech'])
+export const paidMedia = new Map([['generateImage','image'],['generateVideo','video'],['generateMusic','music'],['synthesizeSpeech','tts']])
 const pendingCalls = new Map()
 
 export function recoverMediaItems(store, current) {
@@ -31,7 +33,7 @@ export function recoverMediaItems(store, current) {
 // The gateway keeps credentials, group permissions, receipts and file ownership on the server.
 export async function workerMedia(grant, method, item, args) {
   if (
-    !methods.has(method) ||
+    !mediaMethods.has(method) ||
     !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(item) ||
     !args ||
     typeof args !== 'object' ||
@@ -46,7 +48,18 @@ export async function workerMedia(grant, method, item, args) {
     (caps.tools && !caps.tools(config).some(tool=>tool.function.name===method))
   )
     throw Error('本群已关闭该工具')
-  if (paid.has(method) && ctx.social) throw Error('生成媒体需要群友交办')
+  const spec = caps.tools?.(config).find(t=>t.function.name===method)?.function.parameters
+  if (spec?.additionalProperties === false) {
+    for (const [key,value] of Object.entries(args)) {
+      if (!Object.hasOwn(spec.properties,key)) throw Error(method+' 不支持参数 '+key)
+      const field = spec.properties[key]
+      const validType = field.type === 'array' ? Array.isArray(value) && value.every(v=>typeof v === field.items.type)
+        : field.type === 'integer' ? Number.isInteger(value) : typeof value === field.type
+      if (!validType || (field.enum && !field.enum.includes(value)) || value < field.minimum || value > field.maximum ||
+          (Array.isArray(value) && value.length > field.maxItems)) throw Error(method+' 的参数 '+key+' 无效')
+    }
+  }
+  if (paidMedia.has(method) && ctx.social) throw Error('生成媒体需要群友交办')
   const id = key(ctx.run, 'media', method, item)
   const fingerprint = key(
     Object.keys(args)
@@ -56,13 +69,13 @@ export async function workerMedia(grant, method, item, args) {
   const previous = caps.store.get('mediaItem', id)
   if (previous && previous.fingerprint !== fingerprint)
     throw Error('同一作品编号对应了不同参数；重试请沿用原参数，新版本使用新编号')
-  if (!previous && grant.lease?.recovering && paid.has(method)) {
+  if (!previous && grant.lease?.recovering && paidMedia.has(method)) {
     const run = caps.store.get('run',ctx.run) || {id:ctx.run, m:ctx.m}
     const earlier = recoverMediaItems(caps.store,run).filter(row => row.method === method)
     const original = earlier.find(row => row.item === item)
     if (original?.fingerprint && original.fingerprint !== fingerprint)
       throw Error('同一作品编号对应了不同参数；请沿用原参数')
-    const kind = {generateImage:'image',generateVideo:'video',synthesizeSpeech:'tts'}[method]
+    const kind = paidMedia.get(method)
     if (!original && earlier.some(row => {
       if (row.status === 'ok') return false
       const order = caps.store.get('paid',key(ctx.m.group,ctx.m.id,'beeftv',kind,row.item))
@@ -72,6 +85,8 @@ export async function workerMedia(grant, method, item, args) {
       return row.fingerprint === fingerprint || !row.fingerprint || !order?.receipt?.id || order.state !== 'submitted'
     })) throw Error('恢复时该工具还有回执不确定或相同的项目，请按原编号核对')
   }
+  if (!previous && (method === 'generateMusic' || (method === 'synthesizeSpeech' && config.routes?.tts === 'beeftv')))
+    audioRequest(paidMedia.get(method),args,ctx.m.text)
   if (!previous) caps.store.put('mediaItem', id, { fingerprint, run: ctx.run, method, item })
   const execute = async () => {
     const saved = caps.store.get('step', id)
@@ -103,5 +118,5 @@ export async function workerMedia(grant, method, item, args) {
   if (result.pending || method === 'analyzeMedia') return result
   const resource = result.artifact || result.resource
   const file = await caps.file(ctx.m.group, resource)
-  return { resource, mime: file.mime, data: file.bytes.toString('base64') }
+  return { resource, mime: file.mime, data: file.bytes.toString('base64'), ...(result.applied && {applied:result.applied}) }
 }

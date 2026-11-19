@@ -129,6 +129,8 @@ Worker 可以用 shell、Python、FFmpeg 自己组合处理步骤，通过 pip�
 
 Docker 服务与临时沙箱默认使用北京时间（Asia/Shanghai）。群历史按北京时间筛选，定时提醒也按北京时间输入与显示。SQLite 以 UTC 保存时间戳。
 
+在「接入与模型」为「原创歌曲与配乐」选择 BeefTV 后，群 Agent 可以调用 `generateMusic`。原创歌曲、rap 和配乐默认使用 MiniMax Music 3.0，音频描述包含风格和节奏，歌词与纯伴奏选项单独传递。朗读与对白走 `synthesizeSpeech`，使用 BeefTV 时可以按描述选择已列出的音色、语速、音高、音量和模型支持的情感。执行记录保留实际使用的模型与参数。子 Agent 可以用 `qq-tool tools` 查看本群当前可用的命令和完整参数。[BeefTV 音频接口](https://docs.beeftv.app/docs/api/audio-and-enhance)
+
 音频剪辑支持“截取上面的音乐，从 1:35 后面开始”：关联本群最近的音乐卡片，解析公开音源，由群工作区用工具处理，或由兼容执行器在离线 Docker 中用 FFmpeg 裁剪，再通过 QQ 语音上传返回 MP3。无法取得音源、只取得试听片段或剪辑范围越界时返回实际失败原因；不会绕过登录或付费播放限制。也可直接引用群音频附件。
 
 沙箱 `runCode` 可接收本群素材作为输入文件，通过 Python/subprocess 调用预装的 ffmpeg/ffprobe，并导出一项图片、音频或 MP4 作品。`packages` 支持按需获取 PyPI 纯 Python wheel（可指定 `包名==版本`，依赖需一并列出），校验摘要后在该次离线任务中安装，结果记录实际版本；含本地编译依赖的工具由部署者加入镜像。无宿主目录或密钥挂载。新群默认可执行，已有明确关闭设置继续生效，面板“群与人格”可控制代码、音源及剪辑能力。

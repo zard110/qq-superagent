@@ -3,6 +3,8 @@ import { key } from './messages.mjs'
 import { chat, publicFile } from './network.mjs'
 import { requireProvider } from './providers.mjs'
 
+import { audioRequest, appliedAudio } from './audio-models.mjs'
+
 const base = 'https://beeftv.app/v1'
 const sizes = {
   '1:1': '2048x2048',
@@ -33,7 +35,7 @@ async function request(token, path, body, id) {
   const response = await fetch(base + path, {
     method: body ? 'POST' : 'GET',
     redirect: 'manual',
-    signal: AbortSignal.timeout(115000),
+    signal: AbortSignal.timeout(body?.stream_format === 'sse' ? 480000 : 115000),
     headers: {
       Authorization: 'Bearer ' + token,
       ...(body ? { 'Content-Type': 'application/json' } : {}),
@@ -55,6 +57,56 @@ async function binary(response) {
     return (await publicFile(location, limit)).bytes
   }
   return bounded(response)
+}
+async function audioBytes(response) {
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) return binary(response)
+  let event = '', lines = [], frameSize = 0, buffer = '', size = 0, done = false, url
+  const chunks = [], decoder = new TextDecoder()
+  function consume() {
+    if (!lines.length) return
+    const data = lines.join('\n')
+    lines = []
+    frameSize = 0
+    if (data === '[DONE]') return
+    const payload = JSON.parse(data)
+    const type = payload.type || event
+    if (type === 'error' || type?.endsWith('.error') || payload.error) throw Error('音乐服务报告生成失败')
+    if (type === 'speech.audio.delta') {
+      if (typeof payload.audio !== 'string' || !payload.audio) throw Error('无效的音乐数据片段')
+      const bytes = Buffer.from(payload.audio,'base64')
+      size += bytes.length
+      if (size > limit) throw Error('音乐超过下载上限')
+      chunks.push(bytes)
+    } else if (type === 'speech.audio.done') {
+      done = true
+      url = payload.url || payload.audio_url
+    }
+  }
+  function line(raw) {
+    raw = raw.replace(/\r$/, '')
+    if (!raw) { consume(); event = ''; return }
+    if (raw.startsWith('data:')) {
+      frameSize += raw.length
+      if (frameSize > limit*1.4) throw Error('音乐事件过大')
+      lines.push(raw.slice(5).trimStart())
+    }
+    else if (raw.startsWith('event:')) event = raw.slice(6).trim()
+  }
+  for await (const part of response.body) {
+    buffer += decoder.decode(part,{stream:true})
+    let pos
+    while ((pos = buffer.indexOf('\n')) >= 0) { line(buffer.slice(0,pos)); buffer=buffer.slice(pos+1) }
+    if (buffer.length > limit*1.4) throw Error('音乐事件过大')
+  }
+  buffer += decoder.decode()
+  if (buffer) line(buffer)
+  consume()
+  if (!done) throw Error('音乐连接结束前未收到完成回执')
+  if (!size && url) {
+    if (new URL(url).protocol !== 'https:') throw Error('无效音乐下载地址')
+    return (await publicFile(url,limit)).bytes
+  }
+  return Buffer.concat(chunks)
 }
 function mime(bytes) {
   if (bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png'
@@ -240,18 +292,12 @@ export async function beefMedia(caps, ctx, kind, args, Pending) {
   const get = () => caps.store.get('paid', id)
   const put = (value) => caps.store.put('paid', id, value)
   let job = get()
-  if (job?.artifact) return { artifact: job.artifact, comment: job.comment }
+  const audio = kind === 'tts' || kind === 'music'
+  if (job?.artifact) return { artifact: job.artifact, comment: job.comment, ...(audio && job.body && {applied:appliedAudio(job.body)}) }
   if (!job) {
     let body
-    if (kind === 'tts') {
-      if (!args.text?.trim() || args.text.length > 4000) throw Error('朗读文本需要1至4000字')
-      body = {
-        model: 'minimax-speech-2.8-turbo',
-        input: args.text,
-        voice: args.voice === 'stella' ? 'female-shaonv' : 'male-qn-qingse',
-        speed: 1,
-      }
-    } else body = await prepare(caps, ctx, kind, args, token)
+    if (audio) body = audioRequest(kind,args,m.text)
+    else body = await prepare(caps, ctx, kind, args, token)
     if (!get()) put({ state: 'prepared', body, created: Date.now() })
     job = get()
   }
@@ -264,14 +310,14 @@ export async function beefMedia(caps, ctx, kind, args, Pending) {
     const path =
       kind === 'video'
         ? '/videos'
-        : kind === 'tts'
+        : audio
           ? '/audio/speech'
           : job.body.image
             ? '/images/edits'
             : '/images/generations'
     const response = await request(token, path, job.body, kind === 'image' ? id : undefined)
-    if (kind === 'tts') {
-      bytes = await binary(response)
+    if (audio) {
+      bytes = await audioBytes(response)
       type = 'audio/mpeg'
       if (!(bytes.toString('ascii', 0, 3) === 'ID3' || (bytes[0] === 255 && (bytes[1] & 224) === 224)))
         throw Error('服务未返回 MP3 音频')
@@ -326,5 +372,5 @@ export async function beefMedia(caps, ctx, kind, args, Pending) {
         job = put({ ...job, comment: answer.content.trim() })
     } catch {}
   }
-  return { artifact, comment: job.comment }
+  return { artifact, comment: job.comment, ...(audio && {applied:appliedAudio(job.body)}) }
 }

@@ -75,7 +75,7 @@ function save(c) {
   Object.assign(jev, compatibleEndpoint(jev, previous.vendors.jev))
   if (jev.enabled && (!jev.key.trim() || !jev.model.trim() || !c.vendors.quick.model))
     throw Error('启用路由前请先保存简单模型，并填写 Jev 模型和 Key')
-  c.routes ??= previous.routes
+  c.routes = {...previous.routes,...c.routes}
   if (Object.values(c.routes).includes('openai') && !c.vendors.openai.model) throw Error('请填写 OpenAI 模型名')
   const vision = selectedProvider(c, 'vision')
   if (c.routes.vision === 'follow' && vision?.kind === 'deepseek' && vision.model !== 'deepseek-flash')
@@ -340,6 +340,7 @@ const server = http.createServer(async (req, res) => {
           'searchWeb',
           'recognizeText',
           'synthesizeSpeech',
+          'generateMusic',
           'editAudio',
           'resolveAudioSource',
           'chat',
@@ -358,7 +359,7 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const result = await caps.run(body.name, args, { config: store.config(), m, adminTest: true })
-        if (['synthesizeSpeech', 'editAudio'].includes(body.name) && result.data?.artifact) {
+        if (['synthesizeSpeech','generateMusic','editAudio'].includes(body.name) && result.data?.artifact) {
           const file = await caps.file(group, result.data.artifact)
           result.audio = file.bytes.toString('base64')
           result.audioMime = file.mime

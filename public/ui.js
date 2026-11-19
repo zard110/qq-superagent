@@ -262,6 +262,7 @@ function render() {
     })
   }
   if (tab === '接入与模型') {
+    const modelRoles = ['chat','worker','vision']
     const pick = (role) => {
       const item = state.providerCatalog[role]
       return select('role-' + role, item.label, item.options, c.routes[role])
@@ -277,14 +278,14 @@ function render() {
       card(
         '对话与视觉',
         '<div class="grid">' +
-          ['chat', 'worker', 'vision'].map(pick).join('') +
+          modelRoles.map(pick).join('') +
           '</div>' +
           btn('openVendors', '配置模型供应商'),
       ) +
       card(
         '工具与媒体',
         '<div class="grid">' +
-          ['search', 'fetch', 'speech', 'ocr', 'tts', 'image', 'video'].map(pick).join('') +
+          Object.keys(state.providerCatalog).filter(role=>!modelRoles.includes(role)).map(pick).join('') +
           '</div>',
       ) +
       btn('save', '保存配置')
@@ -324,6 +325,7 @@ function render() {
       searchHistory: '检索群历史和每日记忆',
       recognizeText: '文字识别',
       synthesizeSpeech: '语音合成',
+      generateMusic: '原创音乐',
       searchWeb: '公开网页搜索',
       readWebPage: '读取网页正文、配图和视频',
       analyzeMedia: '图片与视频理解',
@@ -400,6 +402,7 @@ function render() {
         ['harness', 'Harness 群沙箱'],
         ['recognizeText', '文字识别（图片或 PDF）'],
         ['synthesizeSpeech', '语音合成'],
+        ['generateMusic', '原创音乐（输入风格或主题）'],
         ['editAudio', '音频剪辑（上传音频）'],
         ['resolveAudioSource', '音乐卡片公开音源（输入 URL）'],
         ['readWebPage', '读取网页'],
@@ -449,7 +452,7 @@ function render() {
           name,
           question: q,
           ...(name === 'harness' ? { session: val('testSession').trim() } : {}),
-          args: {
+          args: name === 'generateMusic' ? {prompt:q} : name === 'synthesizeSpeech' ? {text:q} : {
             question: q,
             text: q,
             url: q,

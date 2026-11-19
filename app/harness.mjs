@@ -1,7 +1,7 @@
 import { routingContext } from './dialogue.mjs'
 import { historyEnabled } from './memory.mjs'
 import { fetchSkillArchive } from './github-skill.mjs'
-import { workerMedia, recoverMediaItems } from './worker-media.mjs'
+import { workerMedia, recoverMediaItems, mediaMethods, paidMedia } from './worker-media.mjs'
 import http from 'node:http'
 import { instagramPost, isPostPhoto, pagePhotos, photoPageAllowed } from './photo-sources.mjs'
 import net from 'node:net'
@@ -12,6 +12,7 @@ import { key } from './messages.mjs'
 import { publicAddress, provider } from './network.mjs'
 import { publicShareText } from './articles.mjs'
 import { Pending } from './capabilities.mjs'
+import { audioGuidance } from './audio-models.mjs'
 const grants = new Map()
 const gatewayInstance = randomBytes(16).toString('hex')
 const runner = () => process.env.RUNNER_URL || 'http://runner:8090'
@@ -111,6 +112,12 @@ export function startGateway(runtime, port = 8790) {
       if (!Array.isArray(data.args) || data.args.some((a) => typeof a !== 'string'))
         throw Error('参数无效')
       let result
+      if (op === 'tools') {
+        res.end(JSON.stringify(workerTools(g.caps,policy,g.ctx.m.group)))
+        return
+      }
+      if (directCommands.has(op) && !workerTools(g.caps,policy,g.ctx.m.group).some(t=>t.command===op))
+        throw Error('本群未开放这项能力')
       if (op === 'progress') {
         const [stage, completed, next] = data.args
         res.end(JSON.stringify(runtime.reportStage(current, stage, completed, next)))
@@ -131,8 +138,10 @@ export function startGateway(runtime, port = 8790) {
       }
       if(op==='execution-status'){
         const items=g.caps.store.db.prepare("SELECT body FROM records WHERE bucket='mediaItem' AND json_extract(body,'$.run')=?").all(g.ctx.run)
-        const attempted=items.some(row=>['generateImage','generateVideo','synthesizeSpeech'].includes(JSON.parse(row.body).method))
-        res.end(JSON.stringify({attempted}))
+        const attempted=items.some(row=>paidMedia.has(JSON.parse(row.body).method))
+        const history = current ? recoverMediaItems(g.caps.store,current) : []
+        res.end(JSON.stringify({attempted, musicAttempted:history.some(x=>x.method==='generateMusic'),
+          musicReady:history.some(x=>x.method==='generateMusic' && x.status==='ok' && x.resource)}))
         return
       }
       if(op==='resource'){
@@ -163,7 +172,7 @@ export function startGateway(runtime, port = 8790) {
       if (op === 'media') {
         if (data.args.length !== 3) throw Error('需要工具名、作品编号和 JSON 参数')
         const [method, item, json] = data.args
-        if(g.lease.reviewOnly && ['generateImage','generateVideo','synthesizeSpeech'].includes(method))
+        if(g.lease.reviewOnly && paidMedia.has(method))
           throw Error('本轮在核对成品，可复用本地素材和既有回执')
         const media = await workerMedia(g, method, item, JSON.parse(json))
         res.setHeader('content-type', 'application/json')
@@ -222,11 +231,11 @@ export function startGateway(runtime, port = 8790) {
         const config = g.caps.store.config()
         result = await g.caps.run(op, args, { ...g.ctx, config })
       } else if (['searchWeb', 'readWebPage'].includes(op)) {
-        result = await g.caps.run(
-          op,
-          op === 'searchWeb' ? { query: data.args.join(' ') } : { url: data.args[0] },
-          { ...g.ctx, pickingPhotos: g.goal === 'photos', photoPage: photoPageAllowed(data.args[0],g.sourceSite,g.ctx.m.text) },
-        )
+        const args = data.args.length === 1 && data.args[0].trimStart().startsWith('{') ? JSON.parse(data.args[0])
+          : op === 'searchWeb' ? {query:data.args.join(' ')} : {url:data.args[0]}
+        result = await g.caps.run(op,args,{...g.ctx,pickingPhotos:g.goal === 'photos',
+          photoPage:op === 'readWebPage' && photoPageAllowed(args.url,g.sourceSite,g.ctx.m.text)})
+        if (op === 'readWebPage') data.args = [args.url]
       } else throw Error('未知操作')
       if (op === 'readWebPage') {
         const page = data.args[0],
@@ -319,7 +328,7 @@ function grant(runtime, run, lease) {
     caps: runtime.caps,
     sourceSite: run.route?.sourceSite,
     goal: run.route?.goal,
-    ctx: { m: run.m, config, worker: true, social: !!run.social, task: run.ticket, run: run.id },
+    ctx: { m: run.m, config, worker: true, social: !!run.social, task: run.ticket, run: run.id, audioIntent:run.route?.audioIntent },
   }
   grants.set(lease.token, g)
   return g
@@ -341,9 +350,16 @@ async function groupRequest(path, payload) {
   if (!response.ok) throw Error(out.error || 'Runner 请求失败')
   return out
 }
+const directCommands = new Set(['searchWeb','readWebPage','searchHistory','searchGroupMemory'])
+export function workerTools(caps,config,group) {
+  return caps.tools(config).filter(t => !config.groups?.[group]?.disabled?.includes(t.function.name)).map(({function:spec}) => {
+    const name = spec.name
+    const command = mediaMethods.has(name) ? 'media' : directCommands.has(name) ? name : name === 'runCode' ? 'shell' : 'call'
+    return {command,spec}
+  })
+}
 function generalTools(caps,config,group) {
-  const dedicated=new Set(['runCode','analyzeMedia','generateImage','generateVideo','synthesizeSpeech','resolveAudioSource','searchWeb','readWebPage','searchHistory','searchGroupMemory'])
-  return caps.tools(config).filter(t=>!dedicated.has(t.function.name) && !config.groups[group]?.disabled?.includes(t.function.name))
+  return workerTools(caps,config,group).filter(t => t.command === 'call').map(t => ({type:'function',function:t.spec}))
 }
 export async function cancelHarness(runtime,run,lease){
   grants.delete(lease.token)
@@ -420,9 +436,9 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
     shared,
     official: model.kind === 'deepseek',
     inputs,
-    mediaTools: caps.tools(config).map(s => s.function.name).filter(n =>
-      ['analyzeMedia','resolveAudioSource','generateImage','generateVideo','synthesizeSpeech'].includes(n) &&
-      !config.groups[m.group]?.disabled?.includes(n)),
+    toolCatalog:workerTools(caps,config,m.group),
+    audioGuidance,
+    audioIntent:run.route?.audioIntent,
     question: publicShareText(m.text),
     assignment:run.route?.brief,
     executionQuote:run.social ? undefined : run.route?.executionQuote,
@@ -431,7 +447,6 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
     checks:run.route?.checks,
     assignmentInputs:run.assignmentInputs,
     deferredInputs,
-    capabilities:generalTools(caps,config,m.group).map(t=>t.function),
     persona: config.groups[m.group]?.persona || config.persona,
     groupMemory: conversation.cards.map(c=>c.text).join('\n') || undefined,
     sender: { name: m.nickname || store.member(m.group, m.author)?.name, role: m.role },

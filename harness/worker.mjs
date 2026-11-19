@@ -118,10 +118,10 @@ async function turn(job) {
       shared:job.shared,
       deferredInputs:job.deferredInputs,
       sharedUsage:'shared 的 message 对应最近群聊中的消息编号，可以按话题选其中的分享卡和素材。要把已有群素材取到 inputs，运行 qq-tool resource 素材句柄。',
-      capabilities:job.capabilities,
-      capabilityUsage:'按名称和参数调用 qq-tool call TOOL JSON。只使用本群列出的能力。涉及当前时间时使用群聊消息的时间和北京时间。',
-      mediaTools: job.mediaTools,
-      mediaUsage: '已配置的媒体能力通过 qq-tool media TOOL ITEM JSON 调用，密钥由网关管理，无需本地环境变量。用当前任务目录运行。ITEM 是你给每张资产、每张首帧、每个镜头、每句台词取的稳定英文编号；重试同一项沿用编号和参数。analyzeMedia 参数 {resource,question}，先读实际参考照再编剧，依据当前图和任务选择场景。generateImage 参数 {prompt,resources:[图片句柄],ratio}；generateVideo 参数 {prompt,resources:[图片句柄],ratio,seconds,audio}，单镜4至15整数秒，按用户要求的总时长自行拆镜；synthesizeSpeech 参数 {text,voice}；resolveAudioSource 参数 {url}。输入文件名的32位前缀及每次生成返回的 resource 是句柄；生成工具会把素材写到 inputs 并返回路径，直接用来接下一步或剪辑。音乐候选按标题核对。只把本轮真正要求的制作提交给供应商；询问、预览或只要提示词时不要生成。用户明确交办完整制作时，自行编排技能、素材、逐镜生成与剪辑，在任务内保存方案后执行。用户明确要接口生成的镜头必须用真实生成片段。工具失败给出实际阶段和原因，保留已完成的成果。',
+      toolCatalog:job.toolCatalog,
+      audioIntent:job.audioIntent,
+      capabilityUsage:'运行 qq-tool tools 可随时查看最新工具说明。toolCatalog 来自本群实际启用的工具，spec 给出完整输入参数。command=media 用 qq-tool media TOOL ITEM JSON；ITEM 是由你为每项素材分配的稳定编号，重试沿用原编号与参数。command=call 用 qq-tool call TOOL JSON。搜索、网页、群历史和群记忆用 qq-tool COMMAND JSON。command=shell 直接运行 shell。安装群内工具、技能与读取群内资源沿用上面的专用命令。',
+      mediaUsage: job.audioGuidance + ' 以工具回执 applied 中的实际模型和参数为准。生成工具返回本地素材路径，供后续剪辑。复用已有成品；询问或只要提示词时无需生成。',
       musicSources: job.musicSources,
       sourceSite: job.sourceSite,
       recovery: job.recovering
@@ -195,17 +195,19 @@ async function turn(job) {
       return {...resumed,events:[...first.events,...resumed.events]}
     }
     let result = await runStage(prompt,'work')
+    const needsMusic = job.flow && ['music','mixed'].includes(job.audioIntent) && job.requiresFile
+    const executionStatus = () => fetch(gateway+'/execution-status',{
+      method:'POST',headers:{authorization:'Bearer '+job.token,'content-type':'application/json'},
+      body:JSON.stringify({args:[]}),signal:AbortSignal.timeout(5000)
+    }).then(r=>{if(!r.ok) throw Error('无法读取任务的生成记录');return r.json()})
     if (job.flow && job.executionQuote && job.requiresFile && !job.recovering &&
-        (!result.finishReason || ['stop','completed'].includes(result.finishReason)) && !(await readdir(output)).length) {
+        (!result.finishReason || ['stop','completed'].includes(result.finishReason)) && (needsMusic || !(await readdir(output)).length)) {
       // A single review can finish a turn that only wrote a proposal. A submission of uncertain
       // outcome, including an interrupted submission, must never trigger a fresh media order.
-      const status = await fetch(gateway+'/execution-status',{
-        method:'POST',headers:{authorization:'Bearer '+job.token,'content-type':'application/json'},
-        body:JSON.stringify({args:[]}),signal:AbortSignal.timeout(5000)
-      }).then(r=>r.ok?r.json():null).catch(()=>null)
-      if(status?.attempted===false) {
+      const status = await executionStatus().catch(()=>null)
+      if(needsMusic ? status?.musicAttempted===false : status?.attempted===false) {
         const review=JSON.stringify({request:job.question,executionQuote:job.executionQuote,output:'outputs/'+job.run,
-          status:'实际交付目录为空，群网关没有登记本次任务的媒体生成提交。',
+          status:needsMusic ? '这项委托需要新音乐，尚无 generateMusic 提交记录。请按原要求调用音乐模型，再使用返回的素材交付。' : '实际交付目录为空，群网关没有登记本次任务的媒体生成提交。',
           instruction:'核对本轮交付。若上一轮仅停在方案或重复确认，而群友已在原话中委托实际执行，请沿用现有工作完成并交付。若仍缺必要输入、授权范围或接口不可用，简短指出具体阻塞。仅补尚未做的工作；涉及外部操作先核对回执。'})
         const second=await runStage(review,'complete')
         result={...second,events:[...result.events,...second.events]}
@@ -224,6 +226,8 @@ async function turn(job) {
           (result.events.at(-2)?.type || '未知'),
       )
     }
+    if (needsMusic && (await readdir(output)).length && !(await executionStatus()).musicReady)
+      throw Error('原创音乐尚未取得音乐模型的成功回执')
     let incomplete = false
     const checks = job.checks || []
     if(job.flow && job.requiresFile && (checks.length || job.goal==='production') && (await readdir(output)).length){

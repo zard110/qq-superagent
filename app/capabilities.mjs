@@ -9,11 +9,12 @@ import * as deepseek from './deepseek.mjs'
 import { publicShareLink, publicShareText } from './articles.mjs'
 import { searchMemory } from './memory.mjs'
 import { beefMedia } from './beeftv.mjs'
+import { audioProperties } from './audio-models.mjs'
 const str = { type: 'string' }
 const definitions = {
   recognizeText: ['提取图片或 PDF 中的原文，按页返回', { resource: str }],
   synthesizeSpeech: [
-    '仅在群友明确要求朗读或发送语音时合成语音',
+    '将明确交办的台词、旁白朗读成语音。',
     { text: str, voice: { type: 'string', enum: ['stella', 'tide'] } },
   ],
   resolveReference: ['读取当前消息引用的文本、卡片与媒体句柄', {}],
@@ -40,11 +41,12 @@ const definitions = {
   ],
   generateImage: [
     '生成图片或根据指定参考素材改图，仅在用户要求创作时调用',
-    { prompt: str, resource: str, resources: {type:'array',items:str,maxItems:10}, ratio:str },
+    { prompt: str, resource: str, resources: {type:'array',items:str,maxItems:10}, ratio:{type:'string',enum:['1:1','16:9','9:16','4:3','3:4','3:2','2:3','4:5','5:4','21:9','9:21']} },
   ],
+  generateMusic: ['生成原创歌曲、说唱、纯音乐、伴奏或配乐。prompt 写风格与速度，lyrics 写待演唱的歌词。', audioProperties('music')],
   generateVideo: [
     '按用户明确给的4至15整数秒生成480p视频。可多图全能参考，用户要求声音时启用音轨。',
-    {prompt:str, seconds:{type:'integer',minimum:4,maximum:15}, ratio:str, audio:{type:'boolean'}, resources:{type:'array',items:str,maxItems:9}},
+    {prompt:str, seconds:{type:'integer',minimum:4,maximum:15}, ratio:{type:'string',enum:['16:9','9:16','1:1','4:3','3:4','21:9']}, audio:{type:'boolean'}, resource:str, resources:{type:'array',items:str,maxItems:9}},
   ],
   scheduleReminder: [
     '按群管理员的明确请求创建提醒，at 使用含时区的未来 ISO 时间，interval 为 once/daily/weekly',
@@ -91,6 +93,7 @@ export const toolSpecs = Object.entries(definitions).map(([name, [description, p
         {
           recognizeText: ['resource'],
           synthesizeSpeech: ['text'],
+          generateMusic: ['prompt'],
           analyzeMedia: ['resource', 'question'],
           readWebPage: ['url'],
           searchWeb: ['query'],
@@ -110,6 +113,7 @@ const expected = {
   readWebPage: 'fetch',
   recognizeText: 'ocr',
   synthesizeSpeech: 'tts',
+  generateMusic: 'music',
   searchWeb: 'search',
   generateImage: 'image',
   generateVideo: 'video',
@@ -143,6 +147,7 @@ export class Capabilities {
           analyzeMedia: '发现与读取范围',
           generateImage: '群内产物句柄',
           generateVideo: '群内视频产物',
+          generateMusic: '群内音乐产物及实际模型参数',
           recognizeText: '逐页原文',
           synthesizeSpeech: '群内语音产物',
           scheduleReminder: '触发计划',
@@ -168,7 +173,11 @@ export class Capabilities {
   }
   tools(config) {
     const routes = config ? settings(config).routes : {}
-    return [...this.registry.values()].filter((a) => routes[a.provider] !== 'off').map((a) => a.spec)
+    return [...this.registry.values()].filter((a) => routes[a.provider] !== 'off').map(({spec}) => {
+      if (spec.function.name !== 'synthesizeSpeech' || routes.tts !== 'beeftv') return spec
+      const fn = spec.function
+      return {type:'function', function:{...fn,parameters:{...fn.parameters,properties:audioProperties('tts')}}}
+    })
   }
   async run(name, args, ctx) {
     const adapter = this.registry.get(name)
@@ -480,10 +489,17 @@ export class Capabilities {
       )
       return result(pages, [m.id, a.resource])
     }
+    if (name === 'generateMusic') {
+      if ((!ctx.worker && !ctx.adminTest) || ctx.social) throw Error('生成音乐需要群友明确交办')
+      return result(await beefMedia(this,ctx,'music',a,Pending))
+    }
     if (name === 'synthesizeSpeech') {
+      if (ctx.audioIntent === 'music') throw Error('这项任务需要原创歌曲或配乐，请用 generateMusic 生成演唱和伴奏')
       if (!ctx.adminTest && (ctx.social || (!ctx.mediaItem && !/朗读|语音|念给|读给|读出来|配音/.test(m.text))))
         throw Error('请明确要求朗读或发送语音')
       if (provider(config,'tts').kind === 'beeftv') return result(await beefMedia(this,ctx,'tts',a,Pending),[m.id])
+      if (Object.keys(a).some(k=>!['text','voice'].includes(k)) || (a.voice && !['stella','tide'].includes(a.voice)))
+        throw Error('当前语音供应商仅支持 text 和 stella、tide 音色')
       const audio = await deepseek.synthesize(provider(config, 'tts'), a.text, a.voice)
       return result({ artifact: this.save(m.group, 'audio/wav', audio) }, [m.id])
     }

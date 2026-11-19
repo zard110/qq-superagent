@@ -298,7 +298,7 @@ export class Runtime {
         naturalRoute = await decideConversation(this, run)
         const task =
           ['new', 'continue'].includes(naturalRoute.action) ||
-          ['generateImage', 'generateVideo', 'synthesizeSpeech', 'scheduleReminder'].includes(naturalRoute.productTool)
+          ['generateImage', 'generateVideo', 'generateMusic', 'synthesizeSpeech', 'scheduleReminder'].includes(naturalRoute.productTool)
         run.engagement = task ? 'requested' : naturalRoute.participation
         if (
           run.engagement === 'silent' ||
@@ -431,7 +431,7 @@ export class Runtime {
       if (
         !useHarness &&
         !run.ticket &&
-        (['generateImage','generateVideo'].includes(run.route?.productTool) ||
+        (['generateImage','generateVideo','generateMusic'].includes(run.route?.productTool) ||
           heavy.test(m.text) ||
           ref.parts.some((p) => p.mime?.startsWith('video/')) ||
           s.all('run').some((r) => r.ticket && r.m.thread === m.thread && r.id !== id))
@@ -446,7 +446,7 @@ export class Runtime {
             (config.groups[m.group]?.persona || config.persona) +
             '\n身份以本条事件为准：sender 是正在说话的人，“我”指 sender，“你”指助手。mentions 是发信人点名的对象，addressedToBot 表示叫了你；群成员名录是另一份资料。回话时需要 @ 发信人用 <@sender>。需要 @ 别人时使用本群已确认的 <@成员ID>；同名先澄清。不要照抄输入里的 @ 前缀。按名字找人先用 getGroupInfo 的 member 查询本群缓存。' +
             '\n群回复按 QQ Markdown 排版：短答直接写正文，多项用列表，正文与列表间空一行。需要时用 **加粗**、一二级标题和 [来源名称](网址)。表格改用分点。' +
-            '\n音频剪辑用 editAudio，时间换算为秒（1:35=95秒），不填 end 就截到结尾；音乐卡片先用 resolveAudioSource 获取真实音源。必须尝试工具再判断是否可执行，不要仅给用户命令。runCode 支持 Python/subprocess 调用预装 ffmpeg/ffprobe、输入素材、输出作品；packages 可按需安装 PyPI 纯 Python wheel（依赖也需列出）。代码无网络，资源先经 downloadResource 获取。不得把运行失败说成完成。' +
+            '\n音频剪辑用 editAudio，时间换算为秒（1:35=95秒），不填 end 就截到结尾；原创歌曲或配乐用 generateMusic，台词用 synthesizeSpeech，音乐卡片先用 resolveAudioSource 获取真实音源。必须尝试工具再判断是否可执行，不要仅给用户命令。runCode 支持 Python/subprocess 调用预装 ffmpeg/ffprobe、输入素材、输出作品；packages 可按需安装 PyPI 纯 Python wheel（依赖也需列出）。代码无网络，资源先经 downloadResource 获取。不得把运行失败说成完成。' +
             '\n现在 ' +
             groupTime(m.at) +
             '（北京时间）。群聊天历史用 searchHistory；查询群人数、名单或接收设置用 getGroupInfo。只把留存记录中的发言人数称为已发言人数。' +
@@ -482,7 +482,7 @@ export class Runtime {
         .tools(config)
         .filter((t) => !config.groups[m.group]?.disabled?.includes(t.function.name))
         .filter((t) => t.function.name !== 'searchGroupMemory' || historyEnabled(config, m.group))
-        .filter((t) => worker || !['generateImage','generateVideo', 'runCode'].includes(t.function.name))
+        .filter((t) => worker || !['generateImage','generateVideo','generateMusic', 'runCode'].includes(t.function.name))
         .filter((t) => t.function.name !== 'runCode' || config.groups[m.group]?.code !== false)
       if (!worker) specs.push(delegate)
       const clip = audioClipRequest(m.text)
