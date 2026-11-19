@@ -62,13 +62,26 @@ function mime(bytes) {
   if (bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
   throw Error('仅支持 PNG、JPEG 或 WebP 图片')
 }
-async function upload(token, file) {
+const uploading = new Map()
+
+// Reference transfers and downloads can be repeated without submitting a generation order.
+async function transfer(operation) {
+  try {
+    return await operation()
+  } catch (error) {
+    if (error.name !== 'TimeoutError' && !['fetch failed', 'terminated', 'aborted'].includes(error.message) &&
+        error.status !== 429 && !(error.status >= 500 && error.status < 600)) throw error
+    return operation()
+  }
+}
+
+async function upload(token, file, digest) {
   const init = await (
     await request(token, '/media/uploads', {
       kind: 'image',
       mime: file.mime,
       bytes: file.bytes.length,
-      sha256: createHash('sha256').update(file.bytes).digest('hex'),
+      sha256: digest,
     })
   ).json()
   const address = new URL(init.upload_url)
@@ -87,7 +100,7 @@ async function upload(token, file) {
     redirect: 'error',
     signal: AbortSignal.timeout(45000),
   })
-  if (!sent.ok) throw Error('素材上传失败')
+  if (!sent.ok) throw Object.assign(Error('素材上传失败 HTTP ' + sent.status), {status:sent.status})
   const done = await (await request(token, '/media/uploads/complete', { ticket: init.ticket })).json()
   if (new URL(done.url).protocol !== 'https:') throw Error('无效的参考图回执')
   return done.url
@@ -182,7 +195,18 @@ async function prepare(caps, ctx, kind, args, token) {
     prompt = draft.prompt
   }
   const urls = []
-  for (const f of files) urls.push(await upload(token, f))
+  // Preserve reference positions. Two different shots may be uploading the same photo concurrently.
+  for (let i = 0; i < files.length; i += 2) {
+    const batch = files.slice(i, i + 2).map(file => {
+      const digest = createHash('sha256').update(file.bytes).digest('hex')
+      const scope = key(m.group, ctx.run || m.id, token, digest)
+      if (!uploading.has(scope)) {
+        uploading.set(scope, transfer(() => upload(token, file, digest)).finally(() => uploading.delete(scope)))
+      }
+      return uploading.get(scope)
+    })
+    urls.push(...await Promise.all(batch))
+  }
   if (kind === 'image')
     return {
       model: 'dola-seedream-5-5-261028',
@@ -261,7 +285,7 @@ export async function beefMedia(caps, ctx, kind, args, Pending) {
   if (kind === 'image') {
     const location = job.receipt.data?.[0]?.url
     if (!location || new URL(location).protocol !== 'https:') throw Error('未取得图片下载地址')
-    bytes = (await caps.download(location, limit)).bytes
+    bytes = (await transfer(() => caps.download(location, limit))).bytes
     type = mime(bytes)
   } else if (kind === 'video') {
     const path = '/videos/' + encodeURIComponent(job.receipt.id)

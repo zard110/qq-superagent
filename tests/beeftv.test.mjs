@@ -64,6 +64,39 @@ test('同一群任务由 Agent 自定镜头时长，多镜分别记账，并发�
   await assert.rejects(shot('s3'),/关闭/)
 })
 
+test('并行镜头共用正在上传的参考图，短暂断流仅重传素材', async t => {
+  const { caps, ctx } = setup(t, '原样生成 6秒 视频')
+  const bytes = Buffer.from('89504e470d0a1a0a', 'hex')
+  const resource = caps.save('g', 'image/png', bytes)
+  let tickets = 0, uploads = 0, completed = 0, orders = 0
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const path = new URL(url).pathname
+    if (path === '/v1/media/uploads') {
+      tickets++
+      return Response.json({ticket:'upload', upload_url:'https://assets.myqcloud.com/input'})
+    }
+    if (path === '/input') {
+      if (++uploads === 1) throw TypeError('fetch failed')
+      return new Response()
+    }
+    if (path === '/v1/media/uploads/complete') {
+      completed++
+      return Response.json({url:'https://assets.myqcloud.com/ref'})
+    }
+    if (path === '/v1/videos') {
+      assert.equal(JSON.parse(options.body).content[0].image_url.url, 'https://assets.myqcloud.com/ref')
+      return Response.json({id:'v' + ++orders})
+    }
+    if (path.endsWith('/content')) return new Response(Buffer.from('0000ftypmp42'))
+    return Response.json({status:'completed'})
+  })
+  const args = {prompt:'骑行镜头', seconds:6, resources:[resource]}
+  const make = mediaItem => caps.run('generateVideo',args,{...ctx,run:'one-film',mediaItem})
+  const results = await Promise.all([make('one'),make('two')])
+  assert.deepEqual(results.map(r=>r.status),['ok','ok'])
+  assert.deepEqual({tickets,uploads,completed,orders},{tickets:2,uploads:2,completed:1,orders:2})
+})
+
 test('带声视频取回 MP4，等待和重放只创建一次任务', async (t) => {
   const { caps, ctx } = setup(t, '原样生成 6秒 有声视频')
   let creates = 0,
