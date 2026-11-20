@@ -2,7 +2,7 @@ import { Runtime as PreviousRuntime } from './runtime.mjs'
 import { Engine, latestAssignment } from './core.mjs'
 import { key, groupPolicy, replyMentions } from './messages.mjs'
 import { fastRoute } from './fast-routing.mjs'
-import { planAssignment, quickAnswer, toolAgent } from './assignment.mjs'
+import { planAssignment, quickAnswer, toolAgent, imageAnswer } from './assignment.mjs'
 import { taskStatus } from './task-status.mjs'
 import { Pending } from './capabilities.mjs'
 import { historyEnabled } from './memory.mjs'
@@ -712,11 +712,16 @@ export class GroupRuntime extends PreviousRuntime {
           run.route?.source && !run.m.refs.length ? { ...run.m, refs: [run.route.source] } : run.m
         const ref = this.caps.reference(m),
           policy = groupPolicy(s.config(), m.group)
-        const shell = policy.code !== false && !policy.disabled?.includes('runCode')
-        run.executor = shell ? 'harness' : 'tools'
+        const textOnly = !run.route?.requiresFile && !s.get('workerLease', run.id)
+        const vision = textOnly && run.route?.goal === 'imageAnswer'
+        const visualQuestion = textOnly && run.route?.goal === 'answer' &&
+          ref.parts.some(p => p.type === 'media' && p.mime?.startsWith('image/'))
+        const shell = !visualQuestion && policy.code !== false && !policy.disabled?.includes('runCode')
+        run.executor = vision ? 'vision' : shell ? 'harness' : 'tools'
         if (!live(s.get('run', run.id))) return
         s.put('run', run.id, run)
-        result = await (shell ? this.worker : toolAgent)(this, run, ref)
+        if (vision) result = await imageAnswer(this, run, ref)
+        else result = await (shell ? this.worker : toolAgent)(this, run, ref)
       }
       if (!result.text?.trim() && !result.artifact && !result.artifacts?.length)
         throw Error('执行者未返回文字或文件')

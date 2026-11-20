@@ -165,6 +165,7 @@ function render() {
               fastRoute: detail.fast,
               conversation: detail.route,
               progress: detail.progress,
+              waitReason: detail.waitReason,
               steps: detail.steps,
             },
             null,

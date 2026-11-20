@@ -214,6 +214,7 @@ const server = http.createServer(async (req, res) => {
         lifecycle:run.flow ? {decision:decision?.kind,subscribed:!!run.subscribed,assignment:assignment?.state,report:assignment?.report?.state,outcome:ticket?.ended?.outcome} : undefined,
         state: run.state,
         progress: run.progress,
+        waitReason: run.state === 'running' ? run.waitReason : undefined,
         executor: run.executor || 'legacy',
         fast: run.fast,
         route: run.route,

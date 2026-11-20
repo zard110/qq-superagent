@@ -214,6 +214,21 @@ test('机器人引用图片查资料可用视觉、引用和网页工具，越�
   assert.deepEqual(used,methods.slice(0,4))
   assert.equal(a.read('look').fast.lane,'responsible')
 })
+test('单图解读直接使用配置的视觉能力并记录实际回执', async t => {
+  const calls = []
+  const a = fixture(t,{plan:async()=>({action:'new',goal:'imageAnswer',brief:'描述本条图片'}),
+    worker:async()=>{throw Error('不应启动 Runner')},
+    caps:{reference:()=>({parts:[{type:'media',mime:'image/png',resource:'this-image'}]}),
+      run:async(name,args)=>{calls.push([name,args.resource]);return {status:'ok',data:{answer:'图上是一辆自行车。'}}}}})
+  a.send('picture','分析一下图片')
+  await a.process('picture')
+  const r=a.read('picture')
+  assert.equal(r.executor,'vision')
+  assert.equal(r.answer,'图上是一辆自行车。')
+  assert.deepEqual(calls,[['analyzeMedia','this-image']])
+  assert.equal(a.store.all('step').find(s=>s.name==='analyzeMedia').result.status,'ok')
+  assert.equal(a.store.all('out').length,1)
+})
 test('规划接口暂时 503 后重试，仍只交付一次', async t => {
   let calls = 0
   const a = fixture(t, {plan:planAssignment,model:async () => {
