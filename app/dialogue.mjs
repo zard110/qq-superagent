@@ -1,4 +1,4 @@
-import { groupPolicy, groupTime, key } from './messages.mjs'
+import { clipText, groupPolicy, groupTime, key } from './messages.mjs'
 import { cardList, relevantCards } from './cards.mjs'
 import { dailyCards, historyEnabled } from './memory.mjs'
 
@@ -15,7 +15,8 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   const selfId = store.get('selfMember', m.group)
   if (selfId) aliases.set(selfId, '助手')
   const peerLabel = (name) => {
-    const safe = String(name || '').replace(/https?:\/\/\S+|[a-f0-9]{32,}/gi, '').replace(/[\x00-\x1f「」<>]/g, '').trim().slice(0, 48)
+    const label = String(name || '').replace(/https?:\/\/\S+|[a-f0-9]{32,}/gi, '').replace(/[\x00-\x1f「」<>]/g, '').trim()
+    const safe = clipText(label, 48)
     return safe ? '机器人「' + safe + '」' : '其他机器人'
   }
   const alias = (id) => {
@@ -26,12 +27,13 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     }
     return aliases.get(id)
   }
-  const clean = (v, max) =>
+  const clean = (v, max) => clipText(
     String(v || '')
       .replace(/https?:\/\/[^\s<>]+/gi, '[链接]')
       .replace(/<@!?([\w-]+)>/g, (_, id) => '@' + alias(id))
-      .replace(/\b[a-f0-9]{32,}\b/gi, '[标识]')
-      .slice(0, max)
+      .replace(/\b[a-f0-9]{32,}\b/gi, '[标识]'),
+    max,
+  )
   for (const [i, v] of [...rows, m].entries()) {
     for (const u of v.mentions || []) {
       if (u.self) aliases.set(u.id, '助手')

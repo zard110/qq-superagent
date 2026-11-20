@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 export const key = (...parts) =>
   createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)
-const clean = (v) => (typeof v === 'string' ? v.slice(0, 16000) : '')
+// Keep the UTF-16 size bound without splitting a character at the boundary.
+export function clipText(value, limit) {
+  const prefix = value.slice(0, limit)
+  return (value.length > limit ? prefix.replace(/[\uD800-\uDBFF]$/u, '') : prefix).toWellFormed()
+}
+const clean = (v) => (typeof v === 'string' ? clipText(v, 16000) : '')
 export function groupTime(iso) {
   return iso && new Date(Date.parse(iso) + 8 * 3600000).toISOString().replace('Z', '+08:00')
 }

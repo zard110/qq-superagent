@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Store } from '../app/store.mjs'
 import { Runtime } from '../app/runtime.mjs'
-import { key } from '../app/messages.mjs'
+import { clipText, key } from '../app/messages.mjs'
 import { classify, routingContext } from '../app/fast-routing.mjs'
 
 function setup(
@@ -155,6 +155,27 @@ test('同群其他机器人的普通和 @ 事件去重入历史，后续问题�
   assert.equal(a.store.lookup('g','new-bot').authorBot, true)
 })
 
+test('截断表情的历史不会使后续 Jev 请求出现孤立代理项', async t => {
+  const {store,event} = setup(t)
+  const prefix = '字'.repeat(239)
+  assert.equal(clipText(prefix + '🐊', 240), prefix)
+  assert.equal(clipText(prefix + '🐊!', 241), prefix + '🐊')
+  assert.equal(clipText('旧\uD800文', 240), '旧�文')
+  store.message({group:'g',id:'prior',idx:'prior',thread:'t',author:'peer',at:new Date(0).toISOString(),
+    parts:[],refs:[],text:prefix + '🐊后续'})
+  const state = routingContext(store, {m:event('来理解一下图片')})
+  assert.equal(state.history[0].text, prefix)
+  // Old configuration or persisted metadata may already contain a lone surrogate.
+  state.assistantName = '旧\uD800名'
+  t.mock.method(globalThis,'fetch', async (_, options) => {
+    const body = JSON.parse(options.body)
+    assert.equal(body.state.assistantName, '旧�名')
+    assert.equal(body.state.history[0].text, prefix)
+    assert.equal(body.state.current.text, '来理解一下图片')
+    return Response.json({answers:{engagement:{choice:'requested'},difficulty:{choice:'responsible'}}})
+  })
+  assert.equal((await classify({base:'https://jev.invalid',model:'jev',key:'test'},state)).lane,'responsible')
+})
 test('第三方只获得同群二十条短消息、发言人代号和引用摘要', (t) => {
   const { store, event } = setup(t)
   for (let i = 0; i < 22; i++) {

@@ -79,7 +79,7 @@ export async function classify(jev, state) {
           criteria: difficulty,
         },
       },
-    }),
+    }, (_, value) => typeof value === 'string' ? value.toWellFormed() : value),
   })
   if (!response.ok) throw Error('Jev HTTP ' + response.status)
   const { answers } = await response.json()
