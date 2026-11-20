@@ -114,6 +114,7 @@ export class QQ {
         )
         const people = page.members.map((m) => ({
           id: m.member_openid,
+          name: m.member_nickname,
           username: m.username,
           role: m.member_role,
           bot: !!m.bot,

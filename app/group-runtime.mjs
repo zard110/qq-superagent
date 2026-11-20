@@ -611,6 +611,7 @@ export class GroupRuntime extends PreviousRuntime {
             run.route.quick &&
             run.route.action === 'new' &&
             !run.route.requiresFile &&
+            !run.m.inferredRef &&
             !run.m.parts.some((p) => p.type === 'media' || p.type === 'card')
           )
             run.fast.lane = 'quick'

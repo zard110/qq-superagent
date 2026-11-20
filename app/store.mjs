@@ -133,7 +133,8 @@ export class Store {
       .prepare(
         `INSERT INTO group_members VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(g,id) DO UPDATE SET
-      name=CASE WHEN excluded.name!='' AND (excluded.at>=at OR name='') THEN excluded.name ELSE name END,
+      name=CASE WHEN excluded.name!='' AND (excluded.at>=at OR name='') THEN excluded.name
+        WHEN name=username AND excluded.username!='' AND excluded.at>=at THEN '' ELSE name END,
       role=CASE WHEN excluded.role!='' AND (excluded.at>=at OR role='') THEN excluded.role ELSE role END,
       username=CASE WHEN excluded.username!='' AND (excluded.at>=at OR username='') THEN excluded.username ELSE username END,
       bot=max(bot,excluded.bot), at=max(at,excluded.at)`,
@@ -141,7 +142,7 @@ export class Store {
       .run(
         g,
         member.id,
-        member.name || '',
+        member.memberName ?? member.name ?? '',
         member.role || '',
         Number(!!member.bot),
         at,
@@ -151,7 +152,7 @@ export class Store {
   observeMembers(m) {
     this.rememberMember(
       m.group,
-      { id: m.author, name: m.nickname, username: m.username, role: m.role, bot: m.authorBot },
+      { id: m.author, name: m.nickname, memberName:m.memberName, username: m.username, role: m.role, bot: m.authorBot },
       m.at,
     )
     for (const member of m.mentions || []) this.rememberMember(m.group, member, m.at)

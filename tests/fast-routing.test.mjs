@@ -4,6 +4,7 @@ import { Store } from '../app/store.mjs'
 import { Runtime } from '../app/runtime.mjs'
 import { clipText, key } from '../app/messages.mjs'
 import { classify, routingContext } from '../app/fast-routing.mjs'
+import { replyContext } from '../app/dialogue.mjs'
 
 function setup(
   t,
@@ -153,6 +154,25 @@ test('同群其他机器人的普通和 @ 事件去重入历史，后续问题�
   assert.doesNotMatch(JSON.stringify(state), /peer-private|self-private/)
   a.event('新机器人', false, {id:'new-bot', author:{id:'new-private', bot:true, username:'新搭'}})
   assert.equal(a.store.lookup('g','new-bot').authorBot, true)
+})
+
+test('回复用本群名片称呼发言人和被点名者，路由代号不进入作答上下文', t => {
+  const {store,event} = setup(t)
+  event('<@listener> 搞定了', false, {id:'news',author:{id:'speaker',member_nickname:'青禾',username:'小猫'},
+    mentions:[{id:'listener',member_nickname:'阿海',username:'海边'}]})
+  const m = event('谁',true,{id:'ask',author:{id:'asker',username:'小满'},message_scene:{ext:['ref_msg_idx=news']}})
+  store.observeMembers({...m,at:new Date(Date.now()+1000).toISOString(),mentions:[{id:'speaker',memberName:'',username:'小猫',name:'小猫'}]})
+  const run = {m}, named = replyContext(store,run), anonymous = routingContext(store,run)
+  const news = named.history.find(row=>row.text.includes('搞定了'))
+  assert.equal(news.speaker,'青禾')
+  assert.deepEqual(news.mentions,['阿海'])
+  assert.equal(news.text,'@阿海 搞定了')
+  assert.equal(named.quotes[0].speaker,'青禾')
+  assert.equal(named.quotes[0].speakerKey,news.speakerKey)
+  assert.equal(named.current.speaker,'小满')
+  assert.doesNotMatch(JSON.stringify(anonymous),/青禾|阿海|小满/)
+  const other = replyContext(store,{m:{...m,group:'elsewhere',author:'speaker',nickname:'',username:'',refs:[]}})
+  assert.equal(other.current.speaker,'未提供昵称的群友')
 })
 
 test('截断表情的历史不会使后续 Jev 请求出现孤立代理项', async t => {

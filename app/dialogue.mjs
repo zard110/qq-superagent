@@ -3,7 +3,15 @@ import { clipText, groupPolicy, groupTime, key, selectedNaturalReply } from './m
 import { cardList, relevantCards } from './cards.mjs'
 import { dailyCards, historyEnabled } from './memory.mjs'
 
-export function routingContext(store, run, policy = groupPolicy(store.config(), run.m.group), candidates = []) {
+export function routingContext(store, run, policy, candidates = []) {
+  return buildContext(store, run, policy, candidates, true)
+}
+
+export function replyContext(store, run, policy) {
+  return buildContext(store, run, policy, [], false)
+}
+
+function buildContext(store, run, policy = groupPolicy(store.config(), run.m.group), candidates, anonymous) {
   const m = run.m,
     enabled = historyEnabled(store.config(), m.group)
   const rows = enabled
@@ -15,16 +23,25 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     quoted = 0
   const selfId = store.get('selfMember', m.group)
   if (selfId) aliases.set(selfId, '助手')
-  const peerLabel = (name) => {
+  const safeName = (name) => {
     const label = String(name || '').replace(/https?:\/\/\S+|[a-f0-9]{32,}/gi, '').replace(/[\x00-\x1f「」<>]/g, '').trim()
-    const safe = clipText(label, 48)
-    return safe ? '机器人「' + safe + '」' : '其他机器人'
+    return clipText(label, 48)
   }
-  const alias = (id) => {
+  const peerLabel = (name) => safeName(name) ? '机器人「' + safeName(name) + '」' : '其他机器人'
+  const observed = new Map()
+  const identities = new Map()
+  const person = id => {
+    if (!id) return undefined
+    if (!identities.has(id)) identities.set(id, 'p' + (identities.size + 1))
+    return identities.get(id)
+  }
+  const alias = (id, hint) => {
     if (!id) return '未知成员'
     if (!aliases.has(id)) {
       const u = store.member(m.group, id)
-      aliases.set(id, u?.bot ? peerLabel(u.name) : '成员' + ++member)
+      const v = observed.get(id) || hint
+      const name = [u?.name,v?.name,u?.username,v?.username].filter(n => n && n !== id).map(safeName).find(Boolean)
+      aliases.set(id, u?.bot || v?.bot ? peerLabel(name) : anonymous ? '成员' + ++member : name || '未提供昵称的群友')
     }
     return aliases.get(id)
   }
@@ -36,9 +53,12 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     max,
   )
   for (const [i, v] of [...new Map([...rows, m, ...candidates].map(v => [v.id, v])).values()].entries()) {
+    if (v.nickname || v.username || v.authorBot)
+      observed.set(v.author, {name:v.nickname, username:v.username, bot:v.authorBot})
     for (const u of v.mentions || []) {
       if (u.self) aliases.set(u.id, '助手')
       else if (u.bot && u.id && !aliases.has(u.id) && u.name) aliases.set(u.id, peerLabel(u.name))
+      if (!observed.has(u.id)) observed.set(u.id, u)
     }
     for (const id of [v.id, v.idx].filter(Boolean)) labels.set(id, 'm' + (i + 1))
   }
@@ -52,7 +72,8 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
       const parts = parent?.parts || v.parts?.filter((p) => p.quote === ref || p.source === ref) || []
       parents.set(label, {
         id: label,
-        speaker: alias(parent?.author),
+        speaker: alias(parent?.author, {name:parent?.nickname, username:parent?.username, bot:parent?.authorBot}),
+        ...(!anonymous && parent?.author ? {speakerKey:person(parent.author)} : {}),
         text: clean(parent?.text || parts.map((p) => p.text || p.title || '').join(' '), 320),
         attachments: parts
           .filter((p) => p.type === 'media' || p.type === 'card')
@@ -65,6 +86,7 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   const describe = (v, max) => ({
     id: labels.get(v.id),
     speaker: alias(v.author),
+    ...(!anonymous && v.author ? {speakerKey:person(v.author)} : {}),
     at: groupTime(v.at || m.at),
     text: clean(v.text, max),
     mentions: [
@@ -98,6 +120,7 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   }))
   const waiting = store.get('awaitReply', key(m.group, m.author))
   const state = {
+    ...(!anonymous ? {naming:'在群里用 speaker 或 mentions 中的群名片、昵称称呼人。speaker 是说话的人，mentions 是被提到的人。speakerKey 只供区分同名者。历史回复中的“成员1”等旧编号不代表当前身份；缺名字时依消息内容描述发言者。'} : {}),
     ...(candidates.length ? {candidates: candidates.map(v => describe(v, 360))} : {}),
     ...(run.reviewedAt ? {afterCooldown: 'current 是本轮选中的原话。history 中也有此后发生的对话，请结合后续进展回应这个重点。'} : {}),
     memeMode:pluginSettings(store,m.group).mode,
@@ -119,11 +142,29 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     waiting:
       !!run.waitingSource ||
       (!!waiting && waiting.until >= Date.parse(m.at) && m.refs?.includes(waiting.source)),
-    quotedAssistant: quotes.some((q) => q.speaker === '助手'),
+    quotedAssistant: anonymous ? quotes.some(q => q.speaker === '助手') :
+      quotes.some(q => q.speakerKey && (q.speakerKey === person('@bot') || q.speakerKey === person(selfId))),
   }
   // Versioned local targets are never sent to the model.
+  const images = new Map()
+  if (!m.refs?.length && !current.attachments.length) {
+    for (const row of rows) {
+      if (row.at <= m.at && row.parts?.some(p => p.type === 'media' && p.mime?.startsWith('image/')))
+        images.set(labels.get(row.id), row.id)
+    }
+  }
+  if (images.size) state.historyImages = [...images.keys()]
+  if (m.inferredRef && labels.has(m.inferredRef)) state.contextSource = labels.get(m.inferredRef)
+  Object.defineProperty(state, 'imageSources', {value:images})
   Object.defineProperty(state, 'targets', {
     value: new Map(cards.flatMap((v, i) => (selected[i].daily ? [] : [[v.id, selected[i]]]))),
   })
   return state
+}
+
+export function bindHistoryImage(run, context, label) {
+  const source = context.imageSources.get(label)
+  if (!source || run.m.refs?.length) return false
+  run.m = {...run.m, refs:[source], inferredRef:source}
+  return true
 }

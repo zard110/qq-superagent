@@ -2,7 +2,7 @@ import { groupPolicy, proactiveHold, replyMentions } from './messages.mjs'
 import { settings } from './providers.mjs'
 import { provider } from './network.mjs'
 
-import { routingContext } from './dialogue.mjs'
+import { routingContext, replyContext, bindHistoryImage } from './dialogue.mjs'
 import { saveStatement } from './cards.mjs'
 import { historyEnabled } from './memory.mjs'
 export { routingContext }
@@ -68,6 +68,11 @@ export async function classify(jev, state) {
             criteria: { comment:'能顺着这段群聊说一句，或先看分享的图片再回应。', pass:'本条未抽中、明确不欢迎旁人、纯事务通知、或确实无内容可接。' },
           },
         } : {}),
+        ...(state.historyImages?.length ? {imageSource:{
+          type:'choice',
+          instructions:'current 是否要看之前群消息里的图片，或继续问那张图的内容、用途？结合说话者、时间和前文选对应的图片消息。指代清楚即可选，不要求使用 QQ 引用。无关、仅凭文字就能回答或多张图指代不明选 none。',
+          criteria:Object.fromEntries([['none','本条没有明确要读取的历史图片'], ...state.historyImages.map(id=>[id,'读取 history 中 '+id+' 的图片'])]),
+        }} : {}),
         memory: {
           type: 'choice',
           instructions:
@@ -105,6 +110,7 @@ export async function classify(jev, state) {
   const aside = state.naturalReplySelected === true && disposition === 'silent' && socialReply === 'comment'
   return {
     jevAttempts: attempts,
+    ...(state.historyImages?.includes(answers?.imageSource?.choice) ? {imageSource:answers.imageSource.choice} : {}),
     engagement: aside ? 'proactive' : disposition,
     lane: aside ? 'quick' : lane,
     ...(typeof state.naturalReplySelected === 'boolean' ? {
@@ -191,6 +197,8 @@ export async function fastRoute(runtime, run, config, { assessOnly = false } = {
     }
   }
   if (assessOnly && fast.fallback && !directed) fast.engagement = 'undecided'
+  const needsHistoryImage = bindHistoryImage(run, state, fast.imageSource)
+  if (needsHistoryImage) fast.lane = 'responsible'
   fast.started = run.fast.started
   fast.jevMs = Date.now() - started
   run.fast = fast
@@ -248,7 +256,7 @@ export async function fastRoute(runtime, run, config, { assessOnly = false } = {
             role: 'system',
             content: (policy.persona || config.persona) + '\n' + quickInstruction + (fast.aside ? asideInstruction : ''),
           },
-          { role: 'user', content: JSON.stringify(state) },
+          { role: 'user', content: JSON.stringify({...replyContext(store, run, policy), memoryReceipt:state.memoryReceipt}) },
         ],
         undefined,
         AbortSignal.timeout(12000),

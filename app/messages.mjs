@@ -68,6 +68,7 @@ export function normalize(type, d) {
   const mentions = (d.mentions || []).map((user) => ({
     id: clean(user.member_openid || user.id),
     name: clean(user.member_nickname || user.username),
+    memberName: clean(user.member_nickname),
     username: clean(user.username),
     role: clean(user.member_role),
     bot: !!(user.bot || user.is_you),
@@ -81,6 +82,7 @@ export function normalize(type, d) {
     author: d.author?.member_openid || d.author?.id || '',
     ...(d.author?.bot ? { authorBot: true } : {}),
     nickname: clean(d.author?.member_nickname || d.author?.username),
+    memberName: clean(d.author?.member_nickname),
     username: clean(d.author?.username),
     role: d.author?.member_role || 'member',
     at: new Date(d.timestamp || Date.now()).toISOString(),

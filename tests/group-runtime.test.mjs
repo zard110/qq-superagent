@@ -7,7 +7,8 @@ import { QQ } from '../app/qq.mjs'
 import { recoverMediaItems } from '../app/worker-media.mjs'
 import { workerMedia } from '../app/worker-media.mjs'
 import { planAssignment } from '../app/assignment.mjs'
-import { key } from '../app/messages.mjs'
+import { key, resolve } from '../app/messages.mjs'
+import { bindHistoryImage, routingContext } from '../app/dialogue.mjs'
 
 function fixture(t, options = {}) {
   const store = new Store(':memory:')
@@ -328,6 +329,40 @@ test('主动看图尊重规划静默，主动尝试失败也不会打扰群聊',
   assert.equal(a.read('try').state,'failed')
   assert.equal(calls,1)
   assert.equal(a.store.all('out').length,0)
+})
+
+test('历史图片可以由语境选中，发图与两次提问分开发也能交到视觉工具', async t => {
+  const seen = []
+  const a = fixture(t, {jev:true, plan:async () => ({action:'new', goal:'imageAnswer'}),
+    caps:{reference:m => resolve(a.store,m),run:async (name,args) => {
+      seen.push([name,args.resource])
+      return {status:'ok',data:{answer:'图中介绍本地应用。'}}
+    }}})
+  a.store.message({group:'g',id:'poster',idx:'p',author:'A',thread:'p',refs:[],text:'',
+    at:new Date(Date.now()-10000).toISOString(),parts:[{type:'media',mime:'image/png',resource:'original'}]})
+  globalThis.fetch.mock.mockImplementation(async (_,opts) => {
+    const {state,questions} = JSON.parse(opts.body)
+    assert.ok(questions.imageSource)
+    return Response.json({answers:{engagement:{choice:'requested'},difficulty:{choice:'quick'},
+      imageSource:{choice:state.historyImages[0]}}})
+  })
+  for (const [id,text] of [['look','看看上面的图片'],['use','分析下有什么用']]) {
+    a.send(id,text,undefined,id==='look')
+    await a.process(id)
+    assert.equal(a.read(id).state,'done')
+    assert.equal(a.read(id).m.inferredRef,'poster')
+    assert.equal(a.store.lookup('g',id).refs.length,0)
+  }
+  assert.deepEqual(seen,[['analyzeMedia','original'],['analyzeMedia','original']])
+  for (const m of [
+    {...a.read('use').m,refs:['explicit']},
+    {...a.read('use').m,refs:[],parts:[{type:'media',mime:'image/png'}]},
+    {...a.read('use').m,group:'other',refs:[]},
+  ]) {
+    const ctx = routingContext(a.store,{m})
+    assert.equal(ctx.historyImages,undefined)
+    assert.equal(bindHistoryImage({m},ctx,'m1'),false)
+  }
 })
 
 test('单图解读直接使用配置的视觉能力并记录实际回执', async t => {

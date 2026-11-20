@@ -14,7 +14,7 @@ import { chat, provider } from './network.mjs'
 import { audioClipRequest } from './sandbox-tools.mjs'
 import { decideConversation } from './conversation.mjs'
 import { executeHarness } from './harness.mjs'
-import { routingContext } from './dialogue.mjs'
+import { replyContext } from './dialogue.mjs'
 import { fastRoute } from './fast-routing.mjs'
 
 const delegate = {
@@ -451,7 +451,7 @@ export class Runtime {
       )
         this.ticket(run)
       const worker = !!run.ticket
-      const conversation=routingContext(s,run)
+      const conversation=replyContext(s,run)
       const dialog = run.dialog || [
         {
           role: 'system',

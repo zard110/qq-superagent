@@ -1,4 +1,4 @@
-import { routingContext } from './dialogue.mjs'
+import { replyContext } from './dialogue.mjs'
 import { historyEnabled } from './memory.mjs'
 import { fetchSkillArchive } from './github-skill.mjs'
 import { workerMedia, recoverMediaItems, mediaMethods, paidMedia } from './worker-media.mjs'
@@ -406,7 +406,7 @@ async function makeJob(runtime, run, ref, identity, model, recovering) {
       data: file.bytes.toString('base64'),
     })
   }
-  const conversation=routingContext(store,run)
+  const conversation=replyContext(store,run)
   const shared = []
   if(run.flow && historyEnabled(config,m.group)){
     const recent=store.history(m.group,{until:m.at,excludeId:m.id,limit:20}).reverse()

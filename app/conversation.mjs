@@ -1,4 +1,4 @@
-import { routingContext } from './dialogue.mjs'
+import { replyContext } from './dialogue.mjs'
 import { key } from './messages.mjs'
 import { provider } from './network.mjs'
 export async function decideConversation(runtime, run) {
@@ -89,7 +89,7 @@ export async function decideConversation(runtime, run) {
       {
         role: 'user',
         content: JSON.stringify({
-          conversation: routingContext(store, run),
+          conversation: replyContext(store, run),
           sender: m.author,
           text: m.text.replace(/https?:\/\/\S+/g, '[链接]').slice(0, 1000),
           references: object,
