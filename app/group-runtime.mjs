@@ -410,7 +410,7 @@ export class GroupRuntime extends PreviousRuntime {
         summary: previous?.summary || (text || '已交付附件').slice(0, 1400),
         ...(resultOnly ? {} : { answers: id }),
       })
-      if (failed && run.m.authorBot) {
+      if (failed && (run.m.authorBot || (run.social && !run.subscribed && !run.m.mention))) {
         s.put('run', run.id, { ...run, state: 'failed', answer: text })
         return
       }
@@ -544,7 +544,7 @@ export class GroupRuntime extends PreviousRuntime {
         if (
           !run.ticket &&
           (run.route.quiet ||
-            ((!run.fast || run.fast.fallback) &&
+            ((!run.fast || run.fast.fallback || run.fast.engagement === 'proactive') &&
               (run.route.action === 'silent' || run.route.participation === 'silent')) ||
             (proactive && Date.now() - (s.get('lastSpeech', run.m.group) || 0) < cooldown))
         ) {

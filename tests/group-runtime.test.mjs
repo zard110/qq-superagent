@@ -214,6 +214,26 @@ test('机器人引用图片查资料可用视觉、引用和网页工具，越�
   assert.deepEqual(used,methods.slice(0,4))
   assert.equal(a.read('look').fast.lane,'responsible')
 })
+test('主动看图尊重规划静默，主动尝试失败也不会打扰群聊', async t => {
+  let calls = 0
+  const a = fixture(t, {jev:true, engagement:'proactive',
+    plan:async (_, r) => ({action:r.m.id === 'silent' ? 'silent' : 'new', goal:'imageAnswer'}),
+    caps:{reference:() => ({parts:[{type:'media',mime:'image/jpeg',resource:'photo'}]}),
+      run:async () => { calls++; throw Error('素材连接中断') }}})
+  const c = a.store.config()
+  c.groups.g.cooldown = 0
+  a.store.put('config', 'main', c)
+  for (const id of ['silent','try']) {
+    a.runtime.receive('GROUP_MESSAGE_CREATE', {group_openid:'g',id,author:{id:'member'},
+      attachments:[{content_type:'image/jpeg',url:'https://example.test/photo'}]})
+    await a.process(id)
+  }
+  assert.equal(a.read('silent').state,'ignored')
+  assert.equal(a.read('try').state,'failed')
+  assert.equal(calls,1)
+  assert.equal(a.store.all('out').length,0)
+})
+
 test('单图解读直接使用配置的视觉能力并记录实际回执', async t => {
   const calls = []
   const a = fixture(t,{plan:async()=>({action:'new',goal:'imageAnswer',brief:'描述本条图片'}),

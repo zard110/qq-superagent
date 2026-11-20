@@ -245,9 +245,14 @@ export class Capabilities {
           downloaded = await this.download(r.url, 32 * 1024 * 1024)
           break
         } catch (error) {
-          const transient = /aborted|timeout|timed out|reset|socket hang up|premature close|HTTP (429|5..)/i.test([error.name,error.code,error.message].join(' '))
+          const transient = error.code === 'EDNSLOOKUP' || /aborted|timeout|timed out|reset|socket hang up|premature close|HTTP (429|5..)/i.test([error.name,error.code,error.message].join(' '))
           if (!transient) throw error
-          if (attempt === 2) throw Error('已收到素材，但连续三次下载中断，未取得完整文件')
+          if (attempt === 2) {
+            const status = error.message.match(/HTTP (\d{3})/)?.[1]
+            const reason = error.code === 'EDNSLOOKUP' ? '无法解析素材服务器域名'
+              : status ? '素材服务器返回 HTTP ' + status : '连接超时或传输中断'
+            throw Error('已收到素材，重试后仍未取得完整文件：' + reason, {cause:error})
+          }
           await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)))
         }
       }

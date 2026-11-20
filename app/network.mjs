@@ -264,12 +264,21 @@ export async function publicAddress(host) {
       return ip.kind() === 'ipv4' && ip.match(synthetic)
     })
   ) {
-    const dns = await remote('https://dns.google/resolve?type=A&name=' + encodeURIComponent(host), {
-      signal: AbortSignal.timeout(6500),
-    })
-    ips = (dns.Answer || [])
-      .filter((row) => row.type === 1)
-      .map((row) => ({ address: row.data, family: 4 }))
+    const query = '?type=A&name=' + encodeURIComponent(host)
+    const resolvers = host === 'multimedia.nt.qq.com.cn'
+      ? ['https://dns.alidns.com/resolve', 'https://dns.google/resolve']
+      : ['https://dns.google/resolve']
+    const signal = AbortSignal.timeout(6500)
+    try {
+      ips = await Promise.any(resolvers.map(async endpoint => {
+        const dns = await remote(endpoint + query, {signal})
+        const addresses = (dns.Answer || []).filter(row => row.type === 1)
+        if (!addresses.length) throw Error('没有 IPv4 地址')
+        return addresses.map(row => ({address: row.data, family: 4}))
+      }))
+    } catch (cause) {
+      throw Object.assign(Error('未能解析素材服务器域名', {cause}), {code:'EDNSLOOKUP'})
+    }
   }
   if (!ips.length || ips.some((ip) => ipaddr.process(ip.address).range() !== 'unicast'))
     throw Error('地址不属于公开网络')
