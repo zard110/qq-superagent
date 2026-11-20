@@ -352,7 +352,7 @@ async function groupRequest(path, payload) {
 }
 const directCommands = new Set(['searchWeb','readWebPage','searchHistory','searchGroupMemory'])
 export function workerTools(caps,config,group) {
-  return caps.tools(config).filter(t => !config.groups?.[group]?.disabled?.includes(t.function.name)).map(({function:spec}) => {
+  return caps.tools(config,group).filter(t => !config.groups?.[group]?.disabled?.includes(t.function.name)).map(({function:spec}) => {
     const name = spec.name
     const command = mediaMethods.has(name) ? 'media' : directCommands.has(name) ? name : name === 'runCode' ? 'shell' : 'call'
     return {command,spec}

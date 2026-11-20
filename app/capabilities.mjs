@@ -1,3 +1,4 @@
+import { registerMemes, pluginSettings } from './plugins/memes.mjs'
 import { key, resolve, groupTime, historyBound } from './messages.mjs'
 import { provider, auth, remote, readPage, publicFile, chat } from './network.mjs'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
@@ -167,13 +168,14 @@ export class Capabilities {
         execute: (args, ctx) => this.builtin(name, args, ctx),
       })
     }
+    registerMemes(this)
   }
   register(adapter) {
     this.registry.set(adapter.spec.function.name, adapter)
   }
-  tools(config) {
+  tools(config, group) {
     const routes = config ? settings(config).routes : {}
-    return [...this.registry.values()].filter((a) => routes[a.provider] !== 'off').map(({spec}) => {
+    return [...this.registry.values()].filter((a) => routes[a.provider] !== 'off' && (a.provider !== 'memes' || !group || pluginSettings(this.store,group).mode !== 'off')).map(({spec}) => {
       if (spec.function.name !== 'synthesizeSpeech' || routes.tts !== 'beeftv') return spec
       const fn = spec.function
       return {type:'function', function:{...fn,parameters:{...fn.parameters,properties:audioProperties('tts')}}}

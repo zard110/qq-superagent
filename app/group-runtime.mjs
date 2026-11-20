@@ -716,7 +716,7 @@ export class GroupRuntime extends PreviousRuntime {
         const vision = textOnly && run.route?.goal === 'imageAnswer'
         const visualQuestion = textOnly && run.route?.goal === 'answer' &&
           ref.parts.some(p => p.type === 'media' && p.mime?.startsWith('image/'))
-        const shell = !visualQuestion && policy.code !== false && !policy.disabled?.includes('runCode')
+        const shell = run.route?.goal !== 'meme' && !visualQuestion && policy.code !== false && !policy.disabled?.includes('runCode')
         run.executor = vision ? 'vision' : shell ? 'harness' : 'tools'
         if (!live(s.get('run', run.id))) return
         s.put('run', run.id, run)

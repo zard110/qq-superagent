@@ -19,7 +19,7 @@ test('所有已启用的群能力都有命令与完整参数，搜索保留域�
   const catalog = workerTools(caps,ctx.config,'g')
   const commands = new Map(catalog.map(t=>[t.spec.name,t]))
   assert.equal(commands.size,catalog.length)
-  assert.deepEqual([...commands.keys()].sort(),caps.tools(ctx.config).map(t=>t.function.name).filter(n=>n!=='generateVideo').sort())
+  assert.deepEqual([...commands.keys()].sort(),caps.tools(ctx.config,ctx.m.group).map(t=>t.function.name).filter(n=>n!=='generateVideo').sort())
   assert.equal(commands.get('getGroupInfo').command,'call')
   assert.equal(commands.get('runCode').command,'shell')
   assert.equal(commands.get('searchWeb').spec.parameters.properties.timeRange.type,'string')

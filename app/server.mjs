@@ -1,3 +1,4 @@
+import {packs,pluginSettings,savePlugins} from './plugins/memes.mjs'
 import { MemoryArchive } from './memory.mjs'
 import http from 'node:http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
@@ -178,6 +179,30 @@ const server = http.createServer(async (req, res) => {
       return
     }
     const body = await payload(req)
+    if (path === '/api/plugins') {
+      const groups = new Set([...Object.keys(store.config().groups), ...store.db.prepare('select distinct g from messages').all().map(x=>x.g)])
+      if (!groups.has(body.group)) throw Error('请选择已接入的群')
+      const {group, action} = body
+      if (action === 'save') savePlugins(store,group,body.settings)
+      if (action === 'preview') {
+        const item = caps.memes.load().find(x=>x.id===body.id)
+        if (!item) throw Error('找不到表情')
+        res.setHeader('Content-Type',item.mime)
+        return res.end(caps.memes.bytes(item))
+      }
+      const operations = {login:'check', refresh:'refresh', logout:'logout'}
+      const op = Object.hasOwn(operations,action) ? operations[action] : 'status'
+      let luckin
+      try {
+        const response = await fetch(process.env.LUCKIN_BROWSER_URL + '/' + op,{
+          method:op==='status'?'GET':'POST',signal:AbortSignal.timeout(23000)})
+        luckin = await response.json()
+      } catch {luckin={state:'error', detail:'未连接瑞幸专用浏览器'}}
+      const library = caps.memes.load()
+      const settings = pluginSettings(store,group)
+      return json({settings,luckin,packs,counts:Object.fromEntries(Object.keys(packs).map(p=>[p,library.filter(i=>i.pack===p).length])),
+        examples:caps.memes.search({...settings,packs:body.previewPack && Object.hasOwn(packs,body.previewPack)?[body.previewPack]:settings.packs},String(body.query||''),[],String(Date.now())).slice(0,5)})
+    }
     if (path === '/api/test-routing') {
       const vendors = settings(store.config()).vendors
       const started = Date.now()

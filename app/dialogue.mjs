@@ -1,3 +1,4 @@
+import {pluginSettings} from './plugins/memes.mjs'
 import { clipText, groupPolicy, groupTime, key } from './messages.mjs'
 import { cardList, relevantCards } from './cards.mjs'
 import { dailyCards, historyEnabled } from './memory.mjs'
@@ -97,6 +98,7 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   }))
   const waiting = store.get('awaitReply', key(m.group, m.author))
   const state = {
+    memeMode:pluginSettings(store,m.group).mode,
     assistantName: policy.nickname,
     otherBotsNamedHere: store.botsNamedIn(m.group, m.text || '')
       .filter((u) => aliases.get(u.id) !== '助手' && u.label !== policy.nickname)

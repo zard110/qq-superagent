@@ -35,6 +35,12 @@ flowchart LR
 
 流程和术语见上游的[领域模型](vendor/superagent/docs/001-domain.md)和[架构说明](vendor/superagent/docs/007-architecture.md)。
 
+## 群插件
+
+管理面板的「插件」页按群设置斗图模式和可用系列，也可预览本地图库。首次部署时运行 `python scripts/import-memes.py <图库目录> --ocr`，再将生成的 `index.json` 和 `files/` 放入应用持久卷的 `/state/memes/`。OCR 需要 RapidOCR、ONNX Runtime、NumPy 和 Pillow；省略 `--ocr` 可以只使用原始文件名的文字标签。重新运行会检查上游版本并复用已下载的原件。素材来自 [ChineseBQB](https://github.com/zhaoolee/ChineseBQB)，图片内容及出处保留在索引内。
+
+瑞幸使用专用 Chromium 容器检查顾客官网，浏览器资料保存在独立卷。管理员可在插件页检查个人扫码登录、刷新状态或退出。官网只有下载、关注等入口时，面板显示阻塞原因。Windows 微信的官方瑞幸小程序可查看自提门店、带图菜单和好友拼单规则。拼单与跨账号代付需要分别验证，目前群内付款码、取单号和取餐码尚未接通。
+
 ## 新机器首次启动
 
 首次安装需要 Git、可运行 Linux 容器的 Docker Engine（Windows 可用 Docker Desktop）和支持 `additional_contexts` 的 Docker Compose。镜像构建会下载 Node、Python、系统包和 Harness 依赖。宿主机只需能运行 Git 和 Docker。迁移脚本在 Windows 使用 Git 自带的 **Git Bash**，Linux 使用 Bash。

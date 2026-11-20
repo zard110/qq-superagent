@@ -95,13 +95,69 @@ async function save() {
   await refresh()
   notice.textContent = '配置已保存'
 }
+let pluginGeneration = 0
+function pluginsPanel() {
+  const groups=[...new Set([...state.groups,...Object.keys(state.config.groups)])]
+  view.innerHTML=groups.length?select('plugin-group','选择群',groups.map(g=>[g,g]),groups[0])+'<div id="plugin-body"></div>':card('插件','接收到第一条群消息后可按群配置。')
+  if (!groups.length) return
+  async function load(action,extra={}) {
+    const version=++pluginGeneration
+    const group=val('plugin-group')
+    const data=await api('plugins',{group,action,...extra})
+    if (version!==pluginGeneration || tab!=='插件' || group!==val('plugin-group')) return
+    const s=data.settings, coffee=data.luckin
+    $('#plugin-body').innerHTML=card('本地斗图',
+      select('meme-mode','使用方式',[['off','关闭'],['requested','群友要求时发'],['social','看语境主动斗图']],s.mode)+
+      Object.entries(data.packs).map(([id,name])=>'<label><input type="checkbox" id="pack-'+id+'" '+(s.packs.includes(id)?'checked':'')+'>'+escape(name)+'（'+data.counts[id]+'）</label>').join('')+
+      '<div id="meme-previews"></div>'+btn('sample-memes','换一组预览'))+
+      card('瑞幸 · 门店自提','<p>'+escape(coffee.detail)+'</p><div id="coffee-code"></div>'+btn('check-coffee','检查扫码登录')+
+      btn('refresh-coffee','刷新登录状态')+btn('logout-coffee','退出专用浏览器账号')+
+      field('coffee-location','本群常用位置',s.location)+field('coffee-shop','常用自提门店',s.shop))+
+      btn('save-plugins','保存本群插件设置')
+    function settings() {
+      return {mode:val('meme-mode'),packs:Object.keys(data.packs).filter(k=>$('#pack-'+k).checked),
+        location:val('coffee-location'),shop:val('coffee-shop')}
+    }
+    on('save-plugins',async()=>{await load('save',{settings:settings()});notice.textContent='本群插件设置已保存'})
+    on('check-coffee',()=>load('login'))
+    on('refresh-coffee',()=>load('refresh'))
+    on('logout-coffee',()=>load('logout'))
+    const preview=async(items)=>{
+      const box=$('#meme-previews')
+      box.replaceChildren()
+      for(const x of items){
+        const img=document.createElement('img')
+        img.width=76;img.height=76;img.alt=x.caption || x.series;img.title=x.caption || x.series
+        const r=await fetch('/api/plugins',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+          body:JSON.stringify({group,action:'preview',id:x.id})})
+        if(!r.ok || !box.isConnected) return
+        const url=URL.createObjectURL(await r.blob())
+        img.onload=img.onerror=()=>URL.revokeObjectURL(url)
+        img.src=url;box.append(img)
+      }
+    }
+    on('sample-memes',async()=>{const d=await api('plugins',{group,action:'list'});await preview(d.examples)})
+    await preview(data.examples)
+    if(coffee.state==='scan' && coffee.image && version===pluginGeneration && tab==='插件'){
+      const img=document.createElement('img')
+      const bytes=Uint8Array.from(atob(coffee.image),c=>c.charCodeAt(0))
+      const src=URL.createObjectURL(new Blob([bytes],{type:'image/png'}))
+      img.alt='瑞幸个人登录二维码';img.onload=img.onerror=()=>URL.revokeObjectURL(src);img.src=src
+      $('#coffee-code').append(img)
+    }
+  }
+  const reload=()=>load('list').catch(e=>{notice.textContent=e.message})
+  $('#plugin-group').onchange=reload
+  void reload()
+}
+
 function render() {
   $('#login').hidden = true
   $('#workspace').hidden = false
   $('#title').textContent = tab
   const nav = $('#nav')
   nav.replaceChildren()
-  for (const t of ['运行', '模型供应商', '接入与模型', '群与人格', '能力测试', '定时提醒']) {
+  for (const t of ['运行', '模型供应商', '接入与模型', '群与人格', '插件', '能力测试', '定时提醒']) {
     const b = document.createElement('button')
     b.textContent = t
     b.setAttribute('aria-current', String(tab === t))
@@ -113,6 +169,7 @@ function render() {
     nav.append(b)
   }
   const c = state.config
+  if (tab === '插件') return pluginsPanel()
   if (tab === '运行') {
     view.innerHTML =
       card(

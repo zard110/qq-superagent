@@ -7,6 +7,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RUNNER_URL: http://runner:8090
       BROWSER_URL: http://browser:8091
+      LUCKIN_BROWSER_URL: http://luckin-browser:8092
       QQ_EXECUTOR: ${QQ_EXECUTOR:-harness}
     volumes: ["state:/state"]
     depends_on:
@@ -14,7 +15,7 @@ services:
         condition: service_started
       browser:
         condition: service_healthy
-    networks: [default, workers]
+    networks: [default, workers, coffee]
   runner:
     build: ./runner
     environment:
@@ -46,6 +47,17 @@ services:
       retries: 3
       start_period: 10s
     networks: [default]
+  luckin-browser:
+    image: ${COMPOSE_PROJECT_NAME:-qq-superagent}-browser
+    command: ["node","/browser/luckin.mjs"]
+    volumes:
+      - ./browser/luckin.mjs:/browser/luckin.mjs:ro
+      - luckin-profile:/home/node
+    init: true
+    restart: unless-stopped
+    shm_size: 256mb
+    mem_limit: 768m
+    networks: [coffee]
   sandbox:
     build: ./sandbox
     image: qq-superagent-sandbox:local
@@ -61,7 +73,9 @@ services:
     entrypoint: ["node","--version"]
     network_mode: none
 networks:
+  coffee: {}
   workers:
     internal: true
 volumes:
   state: {}
+  luckin-profile: {}

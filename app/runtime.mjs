@@ -494,7 +494,7 @@ export class Runtime {
       const p = provider(config, worker ? 'worker' : 'chat')
       let artifact = run.artifact
       const specs = this.caps
-        .tools(config)
+        .tools(config,m.group)
         .filter((t) => !config.groups[m.group]?.disabled?.includes(t.function.name))
         .filter((t) => t.function.name !== 'searchGroupMemory' || historyEnabled(config, m.group))
         .filter((t) => worker || !['generateImage','generateVideo','generateMusic', 'runCode'].includes(t.function.name))
