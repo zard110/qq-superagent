@@ -151,7 +151,7 @@ export class Store {
   observeMembers(m) {
     this.rememberMember(
       m.group,
-      { id: m.author, name: m.nickname, username: m.username, role: m.role },
+      { id: m.author, name: m.nickname, username: m.username, role: m.role, bot: m.authorBot },
       m.at,
     )
     for (const member of m.mentions || []) this.rememberMember(m.group, member, m.at)
@@ -162,6 +162,11 @@ export class Store {
         "SELECT id,coalesce(nullif(name,''),username) AS name,username,role,bot FROM group_members WHERE g=? AND id=?",
       )
       .get(g, id)
+  }
+  botsNamedIn(g, text) {
+    return this.db.prepare(
+      "SELECT id,coalesce(nullif(name,''),username) AS label FROM group_members WHERE g=? AND bot=1 AND (name!='' AND instr(?,name)>0 OR username!='' AND instr(?,username)>0) ORDER BY length(label) DESC,id LIMIT 20",
+    ).all(g, text, text)
   }
   namedMembers(g, name) {
     return this.db

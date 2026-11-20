@@ -89,8 +89,13 @@ export class Runtime {
     const m = normalize(type, d)
     if (!m || (process.env.QQ_ALLOWED_GROUP && m.group !== process.env.QQ_ALLOWED_GROUP)) return
     return this.store.atomic(() => {
-      this.store.observeMembers(m)
+      const selfId = m.mentions.find((u) => u.self && u.id)?.id
+      if (selfId) this.store.put('selfMember', m.group, selfId)
       const previous = this.store.lookup(m.group, m.id)
+      if (!m.author || previous?.author === '@bot' || m.author === this.store.get('selfMember', m.group)
+          || [d.author?.id, m.author].some((id) => id && id === this.store.get('qq', 'gateway')?.selfId)) return
+      if (this.store.member(m.group, m.author)?.bot) m.authorBot = true
+      this.store.observeMembers(m)
       if (previous?.id === m.id) {
         // QQ may deliver both the @ event and the full event, with different mention details.
         m.mention ||= previous.mention
@@ -110,6 +115,7 @@ export class Runtime {
           mention: m.mention,
           mentions: m.mentions,
           nickname: m.nickname,
+          ...(m.authorBot ? { authorBot: true } : {}),
           parts: m.parts,
           refs: m.refs,
         }
@@ -119,6 +125,15 @@ export class Runtime {
         const queued = this.store.get('run', key(m.group, m.id))
         if (queued?.state === 'queued')
           this.store.put('run', queued.id, { ...queued, m: { ...queued.m, ...identity } })
+      }
+      if (m.authorBot) {
+        if (!previous) {
+          const parent = m.refs.map((id) => this.store.lookup(m.group, id)).find(Boolean)
+          m.thread = parent?.thread || key(m.group, m.refs[0] || m.id)
+          this.store.message(m)
+          return m
+        }
+        return
       }
       const upgrade =
         previous && m.mention && !previous.mention && !this.store.get('run', key(m.group, m.id))

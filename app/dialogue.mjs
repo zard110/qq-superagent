@@ -12,9 +12,18 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     labels = new Map()
   let member = 0,
     quoted = 0
+  const selfId = store.get('selfMember', m.group)
+  if (selfId) aliases.set(selfId, '助手')
+  const peerLabel = (name) => {
+    const safe = String(name || '').replace(/https?:\/\/\S+|[a-f0-9]{32,}/gi, '').replace(/[\x00-\x1f「」<>]/g, '').trim().slice(0, 48)
+    return safe ? '机器人「' + safe + '」' : '其他机器人'
+  }
   const alias = (id) => {
     if (!id) return '未知成员'
-    if (!aliases.has(id)) aliases.set(id, '成员' + ++member)
+    if (!aliases.has(id)) {
+      const u = store.member(m.group, id)
+      aliases.set(id, u?.bot ? peerLabel(u.name) : '成员' + ++member)
+    }
     return aliases.get(id)
   }
   const clean = (v, max) =>
@@ -24,7 +33,10 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
       .replace(/\b[a-f0-9]{32,}\b/gi, '[标识]')
       .slice(0, max)
   for (const [i, v] of [...rows, m].entries()) {
-    for (const u of v.mentions || []) if (u.self) aliases.set(u.id, '助手')
+    for (const u of v.mentions || []) {
+      if (u.self) aliases.set(u.id, '助手')
+      else if (u.bot && u.id && !aliases.has(u.id) && u.name) aliases.set(u.id, peerLabel(u.name))
+    }
     for (const id of [v.id, v.idx].filter(Boolean)) labels.set(id, 'm' + (i + 1))
   }
   const parents = new Map()
@@ -84,6 +96,9 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   const waiting = store.get('awaitReply', key(m.group, m.author))
   const state = {
     assistantName: policy.nickname,
+    otherBotsNamedHere: store.botsNamedIn(m.group, m.text || '')
+      .filter((u) => aliases.get(u.id) !== '助手' && u.label !== policy.nickname)
+      .map((u) => peerLabel(u.label)),
     history,
     current,
     quotes,

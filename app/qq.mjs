@@ -300,7 +300,10 @@ export class QQ {
           if (op === 0)
             this.store.atomic(() => {
               const cursor = this.store.get('qq', 'gateway') || {}
-              if (t === 'READY') cursor.session = d.session_id
+              if (t === 'READY') {
+                cursor.session = d.session_id
+                cursor.selfId = d.user?.id
+              }
               this.status = '已连接'
               const message = this.app.receive(t, d)
               if (message) this.warmDirectory(message.group)

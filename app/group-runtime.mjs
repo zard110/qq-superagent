@@ -474,7 +474,6 @@ export class GroupRuntime extends PreviousRuntime {
     if (!candidate && !run.ticket) return pause()
     if (candidate) {
       if (candidate.thread.evaluating.primary !== id && candidate.triggers.length > 1) return pause()
-      this.engine.candidateDelivered(candidate.evalId)
     }
     const stillCurrent = () => !candidate || this.engine.candidate(id)?.evalId === candidate.evalId
     const conclude = (kind, reason, extra = {}) =>
@@ -485,9 +484,12 @@ export class GroupRuntime extends PreviousRuntime {
         ...extra,
       })
     const scheduled = ['reminder', 'archive'].includes(run.executor)
+    // Start the planner's assessment deadline after Jev returns. The gateway can be slow.
+    if (!scheduled && !run.assessed && !run.fast?.engagement)
+      await fastRoute(this, run, s.config(), { assessOnly: true })
+    if (!stillCurrent()) return pause()
+    if (candidate) this.engine.candidateDelivered(candidate.evalId)
     if (!scheduled && !run.assessed) {
-      if (!run.fast?.engagement) await fastRoute(this, run, s.config(), { assessOnly: true })
-      if (!stillCurrent()) return pause()
       if (run.fast?.lane === 'silent' && !run.ticket) {
         conclude('ignore', run.fast.engagement)
         s.put('run', run.id, { ...run, state: 'ignored' })

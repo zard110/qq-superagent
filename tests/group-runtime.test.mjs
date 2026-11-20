@@ -134,6 +134,41 @@ test('同群附件上传期间可投递另一条消息，同来源保持顺序�
   assert.deepEqual(sent,[['b',1],['a',1],['a',2]])
 })
 
+test('慢速 Jev 返回后仍采用原判断，同时处理另一条消息', async t => {
+  const a = fixture(t, { jev: true })
+  const held = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  let slowCalls = 0
+  t.mock.method(globalThis, 'fetch', async (_, opts) => {
+    if (JSON.parse(opts.body).state.current.text === '慢请求') {
+      slowCalls++
+      entered.resolve()
+      await held.promise
+      opts.signal?.throwIfAborted()
+    }
+    return Response.json({answers:{engagement:{choice:'requested'},difficulty:{choice:'quick'}}})
+  })
+  a.send('slow', '慢请求')
+  const slow = a.process('slow')
+  try {
+    await entered.promise
+    const thread = a.store.threads.active().find(t => t.evaluating)
+    thread.evaluating.deadline = new Date(0).toISOString()
+    a.store.threads.save(thread)
+    a.send('second', '另一条消息')
+    await a.process('second')
+    assert.equal(a.read('second').state, 'done')
+    assert.equal(a.read('slow').state, 'running')
+    await new Promise(resolve => setTimeout(resolve, 3100))
+  } finally {
+    held.resolve()
+    await slow
+  }
+  assert.equal(a.read('slow').executor, 'quick')
+  assert.equal(a.read('slow').fast.fallback, undefined)
+  assert.equal(slowCalls, 1)
+})
+
 test('Jev 超时后的自然续句仍由规划模型结合群聊决定是否接话', async (t) => {
   let planned = 0
   const a = fixture(t, {

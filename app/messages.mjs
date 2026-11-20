@@ -23,7 +23,7 @@ function fields(scene) {
 export function normalize(type, d) {
   if (
     !['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE'].includes(type) ||
-    d.author?.bot ||
+    d.author?.is_you ||
     !d.group_openid ||
     !d.id
   )
@@ -74,6 +74,7 @@ export function normalize(type, d) {
     id: d.id,
     idx: meta.msg_idx || d.id,
     author: d.author?.member_openid || d.author?.id || '',
+    ...(d.author?.bot ? { authorBot: true } : {}),
     nickname: clean(d.author?.member_nickname || d.author?.username),
     username: clean(d.author?.username),
     role: d.author?.member_role || 'member',

@@ -110,6 +110,30 @@ for (const [label, opts, mention, expected] of [
     assert.deepEqual(a.calls, expected)
     assert.equal(a.store.all('out').length, expected.length === 1 ? 0 : 1)
   })
+test('同群其他机器人的普通和 @ 事件去重入历史，后续问题可区分两台机器人', async t => {
+  const a = setup(t)
+  const self = {id:'self-private', username:'小搭', bot:true, is_you:true}
+  const peer = {id:'peer-private', username:'测试鳄', bot:true}
+  a.event('你们看看', true, {id:'both', mentions:[self, peer]})
+  const event = {id:'peer-speech', author:{id:peer.id}, mentions:[self]}
+  a.event('这是我的观点', false, event)
+  a.event('这是我的观点', true, event)
+  a.event('自己的回声', false, {id:'echo', author:{id:self.id, bot:true}})
+  assert.equal(a.store.get('run', key('g', event.id)), undefined)
+  assert.equal(a.store.lookup('g','echo'), undefined)
+  a.event('测试鳄刚刚怎么说的？', true, {message_scene:{ext:['ref_msg_idx=peer-speech']}})
+  await a.process()
+  const state = a.context[0]
+  assert.deepEqual(state.history.find(m => m.text === '你们看看').mentions, ['助手','机器人「测试鳄」'])
+  assert.equal(state.history.filter(m => m.speaker === '机器人「测试鳄」').length, 1)
+  assert.equal(state.quotes[0].text, '这是我的观点')
+  assert.equal(state.quotes[0].speaker, '机器人「测试鳄」')
+  assert.deepEqual(state.otherBotsNamedHere, ['机器人「测试鳄」'])
+  assert.doesNotMatch(JSON.stringify(state), /peer-private|self-private/)
+  a.event('新机器人', false, {id:'new-bot', author:{id:'new-private', bot:true, username:'新搭'}})
+  assert.equal(a.store.lookup('g','new-bot').authorBot, true)
+})
+
 test('第三方只获得同群二十条短消息、发言人代号和引用摘要', (t) => {
   const { store, event } = setup(t)
   for (let i = 0; i < 22; i++) {
