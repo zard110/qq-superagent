@@ -2,7 +2,7 @@ import { Runtime as PreviousRuntime } from './runtime.mjs'
 import { Engine, latestAssignment } from './core.mjs'
 import { key, groupPolicy, replyMentions } from './messages.mjs'
 import { fastRoute } from './fast-routing.mjs'
-import { planAssignment, quickAnswer, peerAnswer, toolAgent } from './assignment.mjs'
+import { planAssignment, quickAnswer, toolAgent } from './assignment.mjs'
 import { taskStatus } from './task-status.mjs'
 import { Pending } from './capabilities.mjs'
 import { historyEnabled } from './memory.mjs'
@@ -83,7 +83,6 @@ export class GroupRuntime extends PreviousRuntime {
           ['timer', 'archive'].includes(t.source) ||
           m?.mention ||
           t.addressed === 'direct' ||
-          (p.nickname && t.text.includes(p.nickname)) ||
           (p.mode === 'rules' && p.rules.some((rule) => rule && t.text.includes(rule)))
         const scope = { group }
         if (directed)
@@ -98,6 +97,10 @@ export class GroupRuntime extends PreviousRuntime {
               sender: t.actor.id,
             },
           }
+        // A name in normal prose may enter evaluation even in quiet mode.
+        // It is not evidence that the speaker addressed the assistant.
+        if (p.mode !== 'social' && p.nickname && t.text.includes(p.nickname))
+          return { admissible: true, strength: 'explicit', basis: { via: 'listed', scope } }
         if (p.mode === 'social')
           return {
             admissible: true,
@@ -500,11 +503,11 @@ export class GroupRuntime extends PreviousRuntime {
         s.put('run', run.id, { ...run, state: 'ignored' })
         return false
       }
-      if (run.ticket || run.fast?.lane !== 'quick') {
+      if ((run.ticket || run.fast?.lane !== 'quick') && run.fast?.lane !== 'silent') {
         run.route ||= await this.plan(this, run)
         if (run.m.authorBot) {
-          const { action, participation, quiet, quick } = run.route
-          run.route = { action: action === 'silent' ? 'silent' : 'new', participation, quiet, quick }
+          const { action, participation, quiet, quick, brief } = run.route
+          run.route = { action: action === 'silent' ? 'silent' : 'new', participation, quiet, quick, brief }
         }
         if (!live(s.get('run', run.id))) return false
         if (!stillCurrent()) {
@@ -541,7 +544,7 @@ export class GroupRuntime extends PreviousRuntime {
         if (
           !run.ticket &&
           (run.route.quiet ||
-            ((!run.m.mention || run.m.authorBot) &&
+            ((!run.fast || run.fast.fallback) &&
               (run.route.action === 'silent' || run.route.participation === 'silent')) ||
             (proactive && Date.now() - (s.get('lastSpeech', run.m.group) || 0) < cooldown))
         ) {
@@ -662,7 +665,7 @@ export class GroupRuntime extends PreviousRuntime {
       let result
       if (
         run.subscribed &&
-        (run.route?.quiet || run.route?.action === 'silent' || run.fast?.engagement === 'quiet')
+        (run.route?.quiet || run.route?.action === 'silent' || ['silent', 'quiet'].includes(run.fast?.engagement))
       ) {
         s.atomic(() => {
           this.engine.inputsRead(t.id, run.inputIds)
@@ -684,7 +687,15 @@ export class GroupRuntime extends PreviousRuntime {
         result = { text: run.route.question }
       else if (run.executor === 'peer') {
         const quick = run.fast?.lane === 'quick' && await quickAnswer(this, run)
-        result = { text: quick || await peerAnswer(this, run) }
+        if (quick) result = { text: quick }
+        else {
+          if (run.fast?.lane === 'quick') {
+            run.fast.lane = 'responsible'
+            run.fast.fallback = '快答转交'
+            s.put('run', run.id, run)
+          }
+          result = await toolAgent(this, run, this.caps.reference(run.m))
+        }
       } else if (run.executor === 'quick') {
         const text = await quickAnswer(this, run)
         if (text) result = { text }

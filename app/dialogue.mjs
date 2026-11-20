@@ -104,7 +104,8 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
     quotes,
     quotedOutsideHistory: [...parents.values()].filter((v) => v.id.startsWith('q')),
     cards,
-    addressedToBot: !!(m.mention || (policy.nickname && m.text?.includes(policy.nickname))),
+    addressedToBot: !!m.mention,
+    mentionsAssistantName: !!(policy.nickname && m.text?.includes(policy.nickname)),
     waiting:
       !!run.waitingSource ||
       (!!waiting && waiting.until >= Date.parse(m.at) && m.refs?.includes(waiting.source)),

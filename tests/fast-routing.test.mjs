@@ -101,7 +101,7 @@ for (const [label, opts, mention, expected] of [
   ['路由超时，直接提问走负责模型', { fail: true }, true, ['jev', 'large']],
   ['路由超时，普通群聊静默', { fail: true }, false, ['jev']],
   ['需要历史和工具的任务走负责模型', { lane: 'responsible' }, true, ['jev', 'large']],
-  ['明确 @ 的正常问题优先回应', { engagement: 'silent' }, true, ['jev', 'small']],
+  ['明确 @ 也采用 Jev 的语境判断', { engagement: 'silent' }, true, ['jev']],
 ])
   test(label, async (t) => {
     const a = setup(t, opts)

@@ -176,6 +176,44 @@ test('未启用 Jev 时其他机器人仍可参与对话，引用不授权续办
   assert.equal(a.read('peer').answer,'好的')
   assert.notEqual(a.read('peer').ticket,'unrelated')
 })
+test('提到助手名只是线索，第三人称和直接称呼采用 Jev 的判断', async t => {
+  const a = fixture(t, {jev:true})
+  const c = a.store.config()
+  c.groups.g.nickname = 'MaxShenBi'
+  a.store.put('config','main',c)
+  const contexts = []
+  t.mock.method(globalThis,'fetch',async (_,opts) => {
+    const state = JSON.parse(opts.body).state
+    contexts.push(state)
+    const choice = state.current.text.startsWith('你看') ? 'silent' : 'requested'
+    return Response.json({answers:{engagement:{choice},difficulty:{choice:'quick'}}})
+  })
+  a.send('third','你看 MaxShenBi 画了什么',null,false)
+  a.send('direct','MaxShenBi，你怎么看',null,false)
+  await a.process('third')
+  await a.process('direct')
+  assert.equal(a.read('third').state,'ignored')
+  assert.equal(a.read('direct').state,'done')
+  assert.ok(contexts.every(c => c.mentionsAssistantName && !c.addressedToBot))
+})
+test('机器人引用图片查资料可用视觉、引用和网页工具，越权调用不会执行', async t => {
+  const methods=['resolveReference','analyzeMedia','searchWeb','readWebPage','generateImage','runCode']
+  const used=[]
+  const a=fixture(t,{jev:true,caps:{
+    tools:()=>methods.map(name=>({type:'function',function:{name}})),
+    run:async(name)=>{used.push(name);return {status:'ok',data:{text:name}}}
+  },model:async(_,dialog,tools)=>{
+    assert.deepEqual(tools.map(t=>t.function.name),methods.slice(0,4))
+    if (dialog.at(-1).role==='tool') return {content:'已按图片和资料回答。'}
+    return {tool_calls:methods.map((name,i)=>({id:'c'+i,type:'function',function:{name,arguments:'{}'}}))}
+  }})
+  a.runtime.receive('GROUP_MESSAGE_CREATE',{group_openid:'g',id:'pic',author:{id:'peer',bot:true},attachments:[{content_type:'image/jpeg',url:'https://img.example/p.jpg'}]})
+  a.runtime.receive('GROUP_AT_MESSAGE_CREATE',{group_openid:'g',id:'look',author:{id:'peer',bot:true},content:'看看这张，再查查出处',message_scene:{ext:['ref_msg_idx=pic']}})
+  await a.process('look')
+  assert.equal(a.read('look').state,'done',a.read('look').answer)
+  assert.deepEqual(used,methods.slice(0,4))
+  assert.equal(a.read('look').fast.lane,'responsible')
+})
 test('规划接口暂时 503 后重试，仍只交付一次', async t => {
   let calls = 0
   const a = fixture(t, {plan:planAssignment,model:async () => {
