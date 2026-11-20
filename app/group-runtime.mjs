@@ -2,7 +2,7 @@ import { Runtime as PreviousRuntime } from './runtime.mjs'
 import { Engine, latestAssignment } from './core.mjs'
 import { key, groupPolicy, replyMentions } from './messages.mjs'
 import { fastRoute } from './fast-routing.mjs'
-import { planAssignment, quickAnswer, toolAgent } from './assignment.mjs'
+import { planAssignment, quickAnswer, peerAnswer, toolAgent } from './assignment.mjs'
 import { taskStatus } from './task-status.mjs'
 import { Pending } from './capabilities.mjs'
 import { historyEnabled } from './memory.mjs'
@@ -156,9 +156,10 @@ export class GroupRuntime extends PreviousRuntime {
     if (!m.author) return
     const s = this.store,
       parent = m.refs.map((id) => s.lookup(m.group, id)).find(Boolean)
-    m.thread = parent?.thread || key(m.group, m.refs[0] || m.id)
+    // A peer can quote a human assignment without taking ownership of it.
+    m.thread = m.authorBot ? key(m.group, m.id) : parent?.thread || key(m.group, m.refs[0] || m.id)
     s.message(m)
-    if (m.mention && /领取|取回|查看结果/.test(m.text)) {
+    if (!m.authorBot && m.mention && /领取|取回|查看结果/.test(m.text)) {
       const held = s
         .all('out')
         .filter(
@@ -285,7 +286,7 @@ export class GroupRuntime extends PreviousRuntime {
         source,
         threads: [{ source, id: m.thread }],
         actor: { source, id: m.author },
-        human: source === 'qq',
+        human: source === 'qq' && !m.authorBot,
         addressed: directed ? 'direct' : 'none',
         at: m.at,
         text: m.text,
@@ -396,7 +397,7 @@ export class GroupRuntime extends PreviousRuntime {
       const t = s.tickets.get(run.ticket)
       if (!live(s.get('run', run.id)) || t?.ended || latestAssignment(t)?.id !== run.assignment) return
       this.engine.inputsRead(t.id, run.inputIds || [])
-      const timer = run.executor === 'reminder'
+      const resultOnly = run.executor === 'reminder' || run.m.authorBot
       const more = s.pendingRuns().some((other) => other.id !== run.id && other.ticket === t.id)
       const previous = run.subscribed && run.executor === 'status' ? latestAssignment(t).report : undefined
       const state = previous && ['blocked','failed'].includes(previous.state) ? previous.state
@@ -404,8 +405,12 @@ export class GroupRuntime extends PreviousRuntime {
       this.engine.report(t.id, {
         state,
         summary: previous?.summary || (text || '已交付附件').slice(0, 1400),
-        ...(timer ? {} : { answers: id }),
+        ...(resultOnly ? {} : { answers: id }),
       })
+      if (failed && run.m.authorBot) {
+        s.put('run', run.id, { ...run, state: 'failed', answer: text })
+        return
+      }
       if (run.fast?.responsibleStarted) run.fast.responsibleMs = Date.now() - run.fast.responsibleStarted
       const files = result.artifacts || (artifact ? [artifact] : [])
       this.publishing = { run, artifact, failed, result, text }
@@ -414,7 +419,7 @@ export class GroupRuntime extends PreviousRuntime {
         const receipt = this.engine.reply({
           ticketId: t.id,
           triggerId: id,
-          purpose: timer ? 'result' : 'answer',
+          purpose: resultOnly ? 'result' : 'answer',
           text: logical,
         })
         if (receipt.reused)
@@ -497,6 +502,10 @@ export class GroupRuntime extends PreviousRuntime {
       }
       if (run.ticket || run.fast?.lane !== 'quick') {
         run.route ||= await this.plan(this, run)
+        if (run.m.authorBot) {
+          const { action, participation, quiet, quick } = run.route
+          run.route = { action: action === 'silent' ? 'silent' : 'new', participation, quiet, quick }
+        }
         if (!live(s.get('run', run.id))) return false
         if (!stillCurrent()) {
           delete run.route
@@ -532,7 +541,7 @@ export class GroupRuntime extends PreviousRuntime {
         if (
           !run.ticket &&
           (run.route.quiet ||
-            (!run.m.mention &&
+            ((!run.m.mention || run.m.authorBot) &&
               (run.route.action === 'silent' || run.route.participation === 'silent')) ||
             (proactive && Date.now() - (s.get('lastSpeech', run.m.group) || 0) < cooldown))
         ) {
@@ -574,6 +583,7 @@ export class GroupRuntime extends PreviousRuntime {
       run.ticket = decision.ticketId
     }
     if (scheduled) run.assessed = true
+    else if (run.m.authorBot) run.executor = 'peer'
     else run.executor = run.fast?.lane === 'quick' && !run.subscribed ? 'quick' : 'harness'
     s.put('run', run.id, run)
     return true
@@ -672,7 +682,10 @@ export class GroupRuntime extends PreviousRuntime {
         result = {text:taskStatus(s, run.m.group, run.route.statusRun)}
       } else if (run.route?.action === 'clarify' || run.route?.action === 'stop')
         result = { text: run.route.question }
-      else if (run.executor === 'quick') {
+      else if (run.executor === 'peer') {
+        const quick = run.fast?.lane === 'quick' && await quickAnswer(this, run)
+        result = { text: quick || await peerAnswer(this, run) }
+      } else if (run.executor === 'quick') {
         const text = await quickAnswer(this, run)
         if (text) result = { text }
         else {

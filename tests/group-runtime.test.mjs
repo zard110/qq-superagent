@@ -135,6 +135,47 @@ test('同群附件上传期间可投递另一条消息，同来源保持顺序�
   assert.deepEqual(sent,[['b',1],['a',1],['a',2]])
 })
 
+test('其他机器人的 @ 和引用可被回复，重复事件仅处理一次，原委托不会被重启', async t => {
+  let calls = 0
+  const a = fixture(t, {jev:true, model:async (_, messages) => {
+    calls++
+    const context = JSON.parse(messages.at(-1).content)
+    assert.equal(context.current.speaker, '机器人「测试鳄」')
+    assert.equal(context.quotes[0].speaker, '助手')
+    return {content:'不客气，小本本这个细节你也发现了！'}
+  }})
+  const ref = {id:'original',idx:'original',group:'g',author:'@bot',at:new Date(Date.now()-5000).toISOString(),text:'这张图送给你。',thread:'original-thread',parts:[],refs:[]}
+  a.store.message(ref)
+  const event = {id:'thanks',group_openid:'g',author:{id:'croc',bot:true,username:'测试鳄'},content:'谢谢，画得真好！',
+    mentions:[{id:'self',is_you:true}],message_scene:{ext:['ref_msg_idx=original']}}
+  a.runtime.receive('GROUP_MESSAGE_CREATE', event)
+  a.runtime.receive('GROUP_AT_MESSAGE_CREATE', event)
+  await a.process('thanks')
+  a.runtime.receive('GROUP_AT_MESSAGE_CREATE', event)
+  const r = a.read('thanks')
+  assert.equal(r.state,'done',r.answer)
+  assert.notEqual(r.m.thread,ref.thread)
+  assert.equal(a.store.triggers.get(r.id).human,false)
+  assert.equal(a.store.all('out').length,1)
+  assert.equal(a.store.all('out')[0].origin,'thanks')
+  assert.equal(calls,1)
+})
+test('其他机器人 @ 助手也可自然结束对话', async t => {
+  const a = fixture(t,{jev:true,engagement:'silent'})
+  a.runtime.receive('GROUP_AT_MESSAGE_CREATE',{group_openid:'g',id:'end',content:'互道再见后又重复了',author:{id:'peer',bot:true}})
+  await a.process('end')
+  assert.equal(a.read('end').state,'ignored')
+  assert.equal(a.store.all('out').length,0)
+})
+test('未启用 Jev 时其他机器人仍可参与对话，引用不授权续办任务', async t => {
+  const a = fixture(t,{plan:async()=>({action:'continue',attach:'unrelated',participation:'requested'}),
+    worker:async()=>{throw Error('不应调用执行者')}})
+  a.runtime.receive('GROUP_AT_MESSAGE_CREATE',{group_openid:'g',id:'peer',content:'你觉得呢？',author:{id:'peer',bot:true}})
+  await a.process('peer')
+  assert.equal(a.read('peer').state,'done',a.read('peer').answer)
+  assert.equal(a.read('peer').answer,'好的')
+  assert.notEqual(a.read('peer').ticket,'unrelated')
+})
 test('规划接口暂时 503 后重试，仍只交付一次', async t => {
   let calls = 0
   const a = fixture(t, {plan:planAssignment,model:async () => {

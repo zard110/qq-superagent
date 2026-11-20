@@ -126,7 +126,7 @@ export class Runtime {
         if (queued?.state === 'queued')
           this.store.put('run', queued.id, { ...queued, m: { ...queued.m, ...identity } })
       }
-      if (m.authorBot) {
+      if (m.authorBot && !this.acceptSource) {
         if (!previous) {
           const parent = m.refs.map((id) => this.store.lookup(m.group, id)).find(Boolean)
           m.thread = parent?.thread || key(m.group, m.refs[0] || m.id)

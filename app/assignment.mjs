@@ -129,6 +129,15 @@ export async function quickAnswer(runtime, run) {
   }
 }
 
+export async function peerAnswer(runtime, run) {
+  const config = runtime.store.config(), policy = groupPolicy(config, run.m.group)
+  const answer = await runtime.model(provider(config, 'chat'), [
+    { role: 'system', content: (policy.persona || config.persona) + '\n当前发言来自群里的另一台机器人。结合群聊与引用自然简答，以自己身份说话；仅交谈，不代群友承诺或执行任务。礼貌收尾时不要再抛问题。' },
+    { role: 'user', content: JSON.stringify(routingContext(runtime.store, run, policy)) },
+  ])
+  return answer.content?.trim()
+}
+
 // An executor for groups whose members may use product tools but cannot run shell commands.
 export async function toolAgent(runtime, run, reference) {
   const { store, caps, model } = runtime,
