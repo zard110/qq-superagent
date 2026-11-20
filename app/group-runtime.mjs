@@ -1,7 +1,7 @@
 import { Runtime as PreviousRuntime } from './runtime.mjs'
 import { Engine, latestAssignment } from './core.mjs'
-import { key, groupPolicy, replyMentions } from './messages.mjs'
-import { fastRoute } from './fast-routing.mjs'
+import { key, groupPolicy, proactiveHold, replyMentions } from './messages.mjs'
+import { fastRoute, asideInstruction, chooseCooldownFocus } from './fast-routing.mjs'
 import { planAssignment, quickAnswer, toolAgent, imageAnswer } from './assignment.mjs'
 import { taskStatus } from './task-status.mjs'
 import { Pending } from './capabilities.mjs'
@@ -22,6 +22,7 @@ export class GroupRuntime extends PreviousRuntime {
     super(store, caps, options)
     this.previous = new PreviousRuntime(store, caps, options)
     this.plan = options.plan || planAssignment
+    this.chooseCooldownFocus = options.chooseCooldownFocus || chooseCooldownFocus
     this.worker = options.worker || executeHarness
     this.engine = new Engine({
       repo: store,
@@ -146,7 +147,8 @@ export class GroupRuntime extends PreviousRuntime {
   upgradeMention(m) {
     const id = key(m.group, m.id),
       r = this.store.get('run', id)
-    if (r?.flow && r.state === 'ignored' && !r.ticket && this.engine.reevaluate(id))
+    if (r?.flow && ['ignored','cooldown'].includes(r.state) && !r.ticket && this.engine.reevaluate(id)) {
+      this.store.del('cooldownCandidate', id)
       this.store.put('run', id, {
         ...r,
         m: { ...r.m, mention: true },
@@ -154,6 +156,7 @@ export class GroupRuntime extends PreviousRuntime {
         route: undefined,
         state: 'queued',
       })
+    }
   }
   acceptSource(m) {
     if (!m.author) return
@@ -438,8 +441,76 @@ export class GroupRuntime extends PreviousRuntime {
       }
     })
   }
+  holdForCooldown(run, conclude) {
+    const s = this.store
+    s.atomic(() => {
+      conclude('ignore', '自然发言冷却，留待复看')
+      s.put('run', run.id, {...run,state:'cooldown'})
+      s.put('cooldownCandidate', run.id, {id:run.id,group:run.m.group,at:run.m.at})
+    })
+  }
+  async reviewCooldown(group, batch) {
+    const s = this.store
+    const retire = (entry, reason) => {
+      const r = s.get('run', entry.id)
+      if (r?.state === 'cooldown')
+        s.put('run', r.id, {...r,state:'ignored',fast:{...r.fast,hold:reason}})
+      s.del('cooldownCandidate', entry.id)
+    }
+    const policy = groupPolicy(s.config(), group)
+    const valid = (entry, p) => inScope(group) && p.mode === 'social' &&
+      p.replyProbability > 0 && Date.now() - Date.parse(entry.at) < 295000
+    const ready = batch.filter(entry => {
+      if (s.get('run', entry.id)?.state !== 'cooldown') {
+        s.del('cooldownCandidate', entry.id)
+        return false
+      }
+      if (valid(entry, policy)) return true
+      s.atomic(() => retire(entry, '已过回复时限或群策略已变更'))
+      return false
+    }).sort((a,b) => a.at.localeCompare(b.at))
+    const cooling = p => Date.now() < (s.get('lastSpeech', group) || 0) + p.cooldown * 1000
+    if (!ready.length || cooling(policy) || ready.some(e => e.retryAt > Date.now())) return
+    const runs = ready.map(e => s.get('run', e.id)).filter(r => r?.state === 'cooldown')
+    if (!runs.length) return
+    const contextHead = () => historyEnabled(s.config(), group) && s.history(group, {limit:1})[0]?.id
+    const head = contextHead()
+    let chosen
+    try {
+      chosen = await this.chooseCooldownFocus(this, runs, policy)
+    } catch {
+      for (const entry of ready)
+        if (s.get('cooldownCandidate', entry.id)) s.put('cooldownCandidate', entry.id, {...entry,retryAt:Date.now()+10000})
+      return
+    }
+    s.atomic(() => {
+      const nowPolicy = groupPolicy(s.config(), group)
+      if (cooling(nowPolicy) || head !== contextHead()) return
+      for (const entry of ready) {
+        if (!s.get('cooldownCandidate', entry.id)) continue
+        const r = s.get('run', entry.id)
+        if (chosen === entry.id && r?.state === 'cooldown' && valid(entry, nowPolicy) &&
+            !proactiveHold(nowPolicy, r.m, s.get('lastSpeech', group)) && this.engine.reevaluate(r.id)) {
+          const fast = {...r.fast,engagement:'proactive',lane:r.fast?.deferredLane || 'responsible',
+            cooldownReview:'已选为本轮重点',hold:undefined}
+          s.put('run', r.id, {...r,fast,state:'queued',social:true,engagement:'proactive',admitted:true,
+            reviewedAt:new Date().toISOString()})
+          s.del('cooldownCandidate', r.id)
+          s.put('lastSpeech', group, Date.now())
+        } else retire(entry, '冷却复看：本轮略过')
+      }
+    })
+  }
   async tick() {
     this.publishStages()
+    const batches = Map.groupBy(this.store.all('cooldownCandidate'), entry => entry.group)
+    for (const [group,batch] of batches) {
+      const lock = 'cooldown:' + group
+      if (this.busy.has(lock)) continue
+      this.busy.add(lock)
+      void this.reviewCooldown(group,batch).catch(e => console.error('群聊冷却复看失败',e.message))
+        .finally(() => this.busy.delete(lock))
+    }
     for (const job of this.store.all('cancel')) {
       if (this.busy.has('stop' + job.run.id)) continue
       this.busy.add('stop' + job.run.id)
@@ -499,12 +570,18 @@ export class GroupRuntime extends PreviousRuntime {
     if (candidate) this.engine.candidateDelivered(candidate.evalId)
     if (!scheduled && !run.assessed) {
       if (run.fast?.lane === 'silent' && !run.ticket) {
+        if (run.fast.deferredLane) {
+          this.holdForCooldown(run, conclude)
+          return false
+        }
         conclude('ignore', run.fast.engagement)
         s.put('run', run.id, { ...run, state: 'ignored' })
         return false
       }
       if ((run.ticket || run.fast?.lane !== 'quick') && run.fast?.lane !== 'silent') {
-        run.route ||= await this.plan(this, run)
+        run.route ||= run.fast?.aside && !run.ticket
+          ? {action:'new', goal:'answer', participation:'proactive', brief:asideInstruction}
+          : await this.plan(this, run)
         if (run.m.authorBot) {
           const { action, participation, quiet, quick, brief } = run.route
           run.route = { action: action === 'silent' ? 'silent' : 'new', participation, quiet, quick, brief }
@@ -540,15 +617,22 @@ export class GroupRuntime extends PreviousRuntime {
         }
         const proactive =
           (!run.fast || run.fast.fallback) && !run.m.mention && run.route.participation === 'proactive'
-        const cooldown = groupPolicy(s.config(), run.m.group).cooldown * 1000
+        const hold = !run.reviewedAt && proactive && proactiveHold(groupPolicy(s.config(), run.m.group), run.m, s.get('lastSpeech', run.m.group))
+        if (hold && run.fast) run.fast.hold = hold
         if (
           !run.ticket &&
           (run.route.quiet ||
             ((!run.fast || run.fast.fallback || run.fast.engagement === 'proactive') &&
               (run.route.action === 'silent' || run.route.participation === 'silent')) ||
-            (proactive && Date.now() - (s.get('lastSpeech', run.m.group) || 0) < cooldown))
+            hold)
         ) {
-          conclude('ignore', '模型判断无需接话')
+          if (!run.reviewedAt && hold === '自然发言冷却中' && groupPolicy(s.config(), run.m.group).mode === 'social' &&
+              !run.route.quiet && run.route.action !== 'silent') {
+            run.fast = {...run.fast,deferredLane:run.fast?.lane || 'responsible',hold}
+            this.holdForCooldown(run, conclude)
+            return false
+          }
+          conclude('ignore', hold || '模型判断无需接话')
           s.put('run', run.id, { ...run, state: 'ignored' })
           return false
         }
@@ -703,7 +787,9 @@ export class GroupRuntime extends PreviousRuntime {
           run.fast.lane = 'responsible'
           run.fast.fallback = '快答转交'
           run.executor = 'harness'
-          run.route = await this.plan(this, run)
+          run.route = run.fast.aside
+            ? {action:'new', goal:'answer', participation:'proactive', brief:asideInstruction}
+            : await this.plan(this, run)
         }
       }
       if (!result) {
@@ -716,7 +802,7 @@ export class GroupRuntime extends PreviousRuntime {
         const vision = textOnly && run.route?.goal === 'imageAnswer'
         const visualQuestion = textOnly && run.route?.goal === 'answer' &&
           ref.parts.some(p => p.type === 'media' && p.mime?.startsWith('image/'))
-        const shell = run.route?.goal !== 'meme' && !visualQuestion && policy.code !== false && !policy.disabled?.includes('runCode')
+        const shell = !run.fast?.aside && run.route?.goal !== 'meme' && !visualQuestion && policy.code !== false && !policy.disabled?.includes('runCode')
         run.executor = vision ? 'vision' : shell ? 'harness' : 'tools'
         if (!live(s.get('run', run.id))) return
         s.put('run', run.id, run)

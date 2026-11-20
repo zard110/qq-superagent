@@ -175,8 +175,17 @@ export function resolve(store, m) {
     missing,
   }
 }
+// Stable per QQ message so retries and duplicate deliveries get the same draw.
+export function selectedNaturalReply(policy, m) {
+  const draw = parseInt(key('natural-reply', m.group, m.id).slice(0, 8), 16) / 0x100000000
+  return draw < policy.replyProbability
+}
+export function proactiveHold(policy, m, lastSpeech, selected = selectedNaturalReply(policy, m)) {
+  if (policy.mode === 'social' && !selected) return '回复概率未命中'
+  if (Date.now() - (lastSpeech || 0) < policy.cooldown * 1000) return '自然发言冷却中'
+}
 export function groupPolicy(config, g) {
-  return { mode: 'quiet', nickname: '小搭', rules: [], cooldown: 90, active: false, ...config.groups[g] }
+  return { mode: 'quiet', nickname: '小搭', rules: [], cooldown: 90, replyProbability: 0.75, active: false, ...config.groups[g] }
 }
 export function route(store, m, config) {
   const policy = groupPolicy(config, m.group)

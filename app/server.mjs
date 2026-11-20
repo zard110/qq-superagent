@@ -90,9 +90,13 @@ function save(c) {
     if (p.base && !['https:', 'http:'].includes(new URL(p.base).protocol))
       throw Error('供应商地址须为 HTTP(S)')
   }
-  for (const g of Object.values(c.groups))
+  for (const g of Object.values(c.groups)) {
     if (!['quiet', 'social', 'rules'].includes(g.mode) || !Array.isArray(g.rules))
       throw Error('群策略格式错误')
+    if (g.replyProbability !== undefined &&
+        (!Number.isFinite(g.replyProbability) || g.replyProbability < 0 || g.replyProbability > 1))
+      throw Error('回复概率须为 0 到 1 的数字')
+  }
   store.atomic(()=>{
     store.put('config', 'main', c)
     app.policyUpdated(old,c)
@@ -155,7 +159,7 @@ const server = http.createServer(async (req, res) => {
           .map((r) => ({
             id: r.id,
             group: r.m.group,
-            question: r.m.text,
+            question: r.m.text || (r.m.parts || []).filter(p => p.type === 'media' || p.type === 'card').map(p => '[' + (p.mime || p.type) + ']').join(' '),
             state: r.progress?.recovering && r.state === 'running' ? 'recovering' : r.state,
             ticket: r.ticket,
             answer: r.answer,

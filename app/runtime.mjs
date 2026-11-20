@@ -1,6 +1,6 @@
 import { historyEnabled } from './memory.mjs'
 import { Engine, latestAssignment } from './core.mjs'
-import { key, normalize, route, groupPolicy, groupTime, replyMentions } from './messages.mjs'
+import { key, normalize, route, groupPolicy, proactiveHold, groupTime, replyMentions } from './messages.mjs'
 import { Pending } from './capabilities.mjs'
 import {
   sharedArticle,
@@ -318,8 +318,7 @@ export class Runtime {
         if (
           run.engagement === 'silent' ||
           (run.engagement === 'proactive' &&
-            Date.now() - (s.get('lastSpeech', m.group) || 0) <
-              groupPolicy(config, m.group).cooldown * 1000)
+            proactiveHold(groupPolicy(config, m.group), m, s.get('lastSpeech', m.group)))
         ) {
           s.put('run', id, { ...run, route: naturalRoute, state: 'ignored' })
           return
@@ -335,7 +334,7 @@ export class Runtime {
             {
               role: 'system',
               content:
-                '判断自然群消息。群友向助手直接提问、交办或续办任务输出 DIRECT，可主动参与讨论输出 YES，普通闲聊输出 NO。',
+                '判断自然群消息。群友向助手直接提问、交办或续办任务输出 DIRECT，群内开放讨论、玩笑和日常闲聊能自然接话输出 YES，明确只对他人说或没有可接的话输出 NO。',
             },
             { role: 'user', content: publicShareText(m.text) },
           ],
@@ -345,8 +344,7 @@ export class Runtime {
         if (
           !direct &&
           (choice.content?.trim() !== 'YES' ||
-            Date.now() - (s.get('lastSpeech', m.group) || 0) <
-              groupPolicy(config, m.group).cooldown * 1000)
+            proactiveHold(groupPolicy(config, m.group), m, s.get('lastSpeech', m.group)))
         ) {
           s.put('run', id, { ...run, state: 'ignored' })
           return

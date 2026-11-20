@@ -71,7 +71,7 @@ const disposition = {requested:'被请求', proactive:'主动参与', quiet:'要
 function routeSummary(fast) {
   if (!fast) return ''
   return [lanes[fast.lane], ...[['Jev',fast.jevMs],['快答',fast.quickMs],['负责模型',fast.responsibleMs]]
-    .filter(([,ms])=>ms != null).map(([name,ms])=>name+' '+ms+' ms'),fast.jevAttempts > 1 ? 'Jev 连接 ' + fast.jevAttempts + ' 次' : '',fast.fallback].filter(Boolean).join(' · ')
+    .filter(([,ms])=>ms != null).map(([name,ms])=>name+' '+ms+' ms'),fast.jevAttempts > 1 ? 'Jev 连接 ' + fast.jevAttempts + ' 次' : '',fast.fallback,fast.cooldownReview,fast.hold || (fast.aside ? 'Jev 选择旁观接话' : fast.lane === 'silent' && fast.selected === false && fast.socialReply === 'pass' && fast.engagement === 'silent' ? '自然回复概率未命中' : '')].filter(Boolean).join(' · ')
 }
 const val = (id) => $('#' + id).value
 const btn = (id, title) => '<button id="' + id + '">' + title + '</button>'
@@ -177,7 +177,7 @@ function render() {
         btn('reload', '刷新') +
           state.runs
             .map((r) =>
-              item(r.question, [r.group, r.state, routeSummary(r.fast), r.answer || r.ticket].filter(Boolean).join(' · ')),
+              item(r.question, [r.group, r.state === 'cooldown' ? '冷却待复看' : r.state, routeSummary(r.fast), r.answer || r.ticket].filter(Boolean).join(' · ')),
             )
             .join('') +
           (state.runs.length ? '' : '<p>等待群消息</p>'),
@@ -403,11 +403,14 @@ function render() {
           '未 @ 时的介入方式',
           [
             ['quiet', '克制参与'],
-            ['social', '像群友聊天'],
+            ['social', '自然介入（像群友聊天）'],
             ['rules', '仅命中规则'],
           ],
           p.mode,
         ) +
+        '<div id="socialProbability"><label for="replyProbability">自然回复概率 <output id="probabilityValue"></output></label>' +
+        '<input id="replyProbability" type="range" min="0" max="1" step="0.01" value="' + escape(p.replyProbability ?? 0.75) + '">' +
+        '<small>0 只回应明确招呼，1 尽量接每个适合的话题。冷却设为 0 秒可连续接话。</small></div>' +
         field('nickname', '昵称', p.nickname ?? '小搭') +
         field('rules', '触发词（用逗号隔开）', (p.rules || []).join(',')) +
         field('cooldown', '自然发言冷却（秒）', p.cooldown ?? 90, 'number') +
@@ -430,6 +433,14 @@ function render() {
           )
           .join('') +
         btn('gsave', '保存此群')
+      const probability = $('#replyProbability')
+      const showProbability = () => {
+        $('#socialProbability').hidden = val('mode') !== 'social'
+        $('#probabilityValue').textContent = Number(probability.value).toFixed(2)
+      }
+      $('#mode').onchange = showProbability
+      probability.oninput = showProbability
+      showProbability()
       on('gsave', async () => {
         if (!val('group').trim()) throw Error('请填写群 OpenID')
         c.groups[val('group').trim()] = {
@@ -439,7 +450,8 @@ function render() {
             .split(/[,，]/)
             .map((x) => x.trim())
             .filter(Boolean),
-          cooldown: Math.max(5, Number(val('cooldown')) || 90),
+          cooldown: Math.max(0, Number(val('cooldown') || 90)),
+          replyProbability: Number(probability.value),
           persona: val('override'),
           active: $('#active').checked,
           disabled: Object.keys(switches).filter((k) => !$('#allow-' + k).checked),

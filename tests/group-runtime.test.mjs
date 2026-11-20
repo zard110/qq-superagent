@@ -52,6 +52,49 @@ function fixture(t, options = {}) {
   const process = (id) => runtime.process(read(id))
   return { store, runtime, send, read, process }
 }
+for (const select of [true, false]) test('冷却后按新上下文挑一条或全略过：' + select, async t => {
+  let reviews = 0
+  const a = fixture(t, {jev:true, engagement:'proactive'})
+  const c = a.store.config()
+  c.groups.g.cooldown = 60
+  c.groups.g.replyProbability = 1
+  a.store.put('config','main',c)
+  a.store.put('lastSpeech','g',Date.now())
+  globalThis.fetch.mock.mockImplementation(async (_,opts) => {
+    const {questions,state} = JSON.parse(opts.body)
+    if (questions.focus) {
+      reviews++
+      assert.equal(state.current.text,'后面这一句是补充')
+      assert.deepEqual(state.candidates.map(x=>x.text).sort(),['一直在送啊','重点是发给谁'].sort())
+      return Response.json({answers:{focus:{choice:select ? state.candidates.find(x=>x.text==='重点是发给谁').id : 'none'}}})
+    }
+    return Response.json({answers:{engagement:{choice:'proactive'},difficulty:{choice:'quick'}}})
+  })
+  for (const [id,text] of [['one','重点是发给谁'],['two','一直在送啊']]) {
+    a.send(id,text,undefined,false)
+    await a.process(id)
+    assert.equal(a.read(id).state,'cooldown')
+  }
+  a.store.message({...a.read('two').m,id:'later',idx:'later',text:'后面这一句是补充',at:new Date(Date.now()+1).toISOString()})
+  const review = () => a.runtime.reviewCooldown('g', a.store.all('cooldownCandidate'))
+  await review()
+  assert.equal(reviews,0)
+  a.store.put('lastSpeech','g',Date.now()-61000)
+  await review()
+  assert.equal(reviews,1)
+  assert.equal(a.store.all('cooldownCandidate').length,0)
+  assert.equal(a.read('two').state,'ignored')
+  if (select) {
+    assert.equal(a.read('one').state,'queued')
+    await a.process('one')
+    assert.equal(a.read('one').state,'done')
+    assert.equal(a.store.all('out')[0].origin,'one')
+  } else assert.equal(a.read('one').state,'ignored')
+  await review()
+  assert.equal(reviews,1)
+  assert.equal(a.store.all('out').length,select?1:0)
+})
+
 test('五个独立委托执行期间仍接收和回答同群快答', async t => {
   const held = Promise.withResolvers(), started = new Set()
   const a = fixture(t,{worker: async (_, run) => {
@@ -214,6 +257,58 @@ test('机器人引用图片查资料可用视觉、引用和网页工具，越�
   assert.deepEqual(used,methods.slice(0,4))
   assert.equal(a.read('look').fast.lane,'responsible')
 })
+for (const [label, probability, engagement, expected] of [
+  ['最沉默时不主动插话', 0, 'proactive', 'ignored'],
+  ['最沉默时仍回应对自己的提问', 0, 'requested', 'done'],
+  ['最积极时参与普通开放话题', 1, 'proactive', 'done'],
+  ['最积极时也尊重明确的安静请求', 1, 'quiet', 'ignored'],
+  ['最积极时仍允许模型判断对象是别人', 1, 'silent', 'ignored'],
+]) test(label, async t => {
+  const a = fixture(t, {jev:true, engagement})
+  const c = a.store.config()
+  c.groups.g.replyProbability = probability
+  c.groups.g.cooldown = 0
+  a.store.put('config', 'main', c)
+  a.send('chat', '聊聊今天的比赛', undefined, false)
+  await a.process('chat')
+  assert.equal(a.read('chat').state, expected)
+  assert.equal(a.store.all('out').length, expected === 'done' ? 1 : 0)
+})
+
+for (const [p, engagement, expected] of [[1,'silent','done'],[0,'silent','ignored'],[1,'quiet','ignored']]) {
+  test('机器人旁观互动使用 Jev 的概率输入 ' + [p,engagement].join('/'), async t => {
+    const a = fixture(t, {plan:async () => assert.fail('群聊点评无需委派生产任务')})
+    const c = a.store.config()
+    c.groups.g.replyProbability = p
+    c.groups.g.cooldown = 0
+    c.vendors.jev.enabled = true
+    a.store.put('config','main',c)
+    t.mock.method(globalThis,'fetch',async (_,opts) => {
+      const {questions,state} = JSON.parse(opts.body)
+      assert.ok(questions.socialReply)
+      assert.equal(state.replyProbability,p)
+      assert.equal(state.naturalReplySelected,p===1)
+      return Response.json({answers:{engagement:{choice:engagement},socialReply:{choice:'comment'},difficulty:{choice:'responsible'}}})
+    })
+    a.runtime.receive('GROUP_MESSAGE_CREATE',{group_openid:'g',id:'banter',author:{id:'peer',bot:true},
+      content:'<@member> 老板，这杯咖啡得先过我的质量关！',mentions:[{id:'member'}]})
+    await a.process('banter')
+    assert.equal(a.read('banter').state,expected)
+    assert.equal(a.store.all('out').length,expected==='done'?1:0)
+  })
+}
+
+test('未启用 Jev 时规划模型的主动接话也使用本群概率', async t => {
+  const a = fixture(t, {plan:async () => ({action:'new', participation:'proactive', goal:'answer'})})
+  const c = a.store.config()
+  c.groups.g.replyProbability = 0
+  a.store.put('config', 'main', c)
+  a.send('chat', '聊聊今天的比赛', undefined, false)
+  await a.process('chat')
+  assert.equal(a.read('chat').state, 'ignored')
+  assert.equal(a.store.all('out').length, 0)
+})
+
 test('主动看图尊重规划静默，主动尝试失败也不会打扰群聊', async t => {
   let calls = 0
   const a = fixture(t, {jev:true, engagement:'proactive',
@@ -222,6 +317,7 @@ test('主动看图尊重规划静默，主动尝试失败也不会打扰群聊',
       run:async () => { calls++; throw Error('素材连接中断') }}})
   const c = a.store.config()
   c.groups.g.cooldown = 0
+  c.groups.g.replyProbability = 1
   a.store.put('config', 'main', c)
   for (const id of ['silent','try']) {
     a.runtime.receive('GROUP_MESSAGE_CREATE', {group_openid:'g',id,author:{id:'member'},

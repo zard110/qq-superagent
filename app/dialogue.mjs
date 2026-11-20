@@ -1,13 +1,13 @@
 import {pluginSettings} from './plugins/memes.mjs'
-import { clipText, groupPolicy, groupTime, key } from './messages.mjs'
+import { clipText, groupPolicy, groupTime, key, selectedNaturalReply } from './messages.mjs'
 import { cardList, relevantCards } from './cards.mjs'
 import { dailyCards, historyEnabled } from './memory.mjs'
 
-export function routingContext(store, run, policy = groupPolicy(store.config(), run.m.group)) {
+export function routingContext(store, run, policy = groupPolicy(store.config(), run.m.group), candidates = []) {
   const m = run.m,
     enabled = historyEnabled(store.config(), m.group)
   const rows = enabled
-    ? store.history(m.group, { until: m.at, excludeId: m.id, limit: 20 }).reverse()
+    ? store.history(m.group, { until: run.reviewedAt || m.at, excludeId: m.id, limit: 20 }).reverse()
     : []
   const aliases = new Map([['@bot', '助手']]),
     labels = new Map()
@@ -35,7 +35,7 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
       .replace(/\b[a-f0-9]{32,}\b/gi, '[标识]'),
     max,
   )
-  for (const [i, v] of [...rows, m].entries()) {
+  for (const [i, v] of [...new Map([...rows, m, ...candidates].map(v => [v.id, v])).values()].entries()) {
     for (const u of v.mentions || []) {
       if (u.self) aliases.set(u.id, '助手')
       else if (u.bot && u.id && !aliases.has(u.id) && u.name) aliases.set(u.id, peerLabel(u.name))
@@ -98,7 +98,13 @@ export function routingContext(store, run, policy = groupPolicy(store.config(), 
   }))
   const waiting = store.get('awaitReply', key(m.group, m.author))
   const state = {
+    ...(candidates.length ? {candidates: candidates.map(v => describe(v, 360))} : {}),
+    ...(run.reviewedAt ? {afterCooldown: 'current 是本轮选中的原话。history 中也有此后发生的对话，请结合后续进展回应这个重点。'} : {}),
     memeMode:pluginSettings(store,m.group).mode,
+    ...(policy.mode === 'social' ? {
+      replyProbability: policy.replyProbability,
+      naturalReplySelected: selectedNaturalReply(policy, m),
+    } : {}),
     assistantName: policy.nickname,
     otherBotsNamedHere: store.botsNamedIn(m.group, m.text || '')
       .filter((u) => aliases.get(u.id) !== '助手' && u.label !== policy.nickname)
