@@ -6,6 +6,7 @@ import { Pending } from '../app/capabilities.mjs'
 import { QQ } from '../app/qq.mjs'
 import { recoverMediaItems } from '../app/worker-media.mjs'
 import { workerMedia } from '../app/worker-media.mjs'
+import { planAssignment } from '../app/assignment.mjs'
 import { key } from '../app/messages.mjs'
 
 function fixture(t, options = {}) {
@@ -132,6 +133,19 @@ test('同群附件上传期间可投递另一条消息，同来源保持顺序�
   }
   await qq.flush()
   assert.deepEqual(sent,[['b',1],['a',1],['a',2]])
+})
+
+test('规划接口暂时 503 后重试，仍只交付一次', async t => {
+  let calls = 0
+  const a = fixture(t, {plan:planAssignment,model:async () => {
+    if (++calls === 1) throw Object.assign(new Error('服务返回 HTTP 503'), {status:503})
+    return {content:JSON.stringify({action:'new',goal:'answer',brief:'正常回复'})}
+  }})
+  a.send('plan-retry', '帮我处理')
+  await a.process('plan-retry')
+  assert.equal(calls, 2)
+  assert.equal(a.read('plan-retry').state, 'done')
+  assert.equal(a.store.all('out').length, 1)
 })
 
 test('慢速 Jev 返回后仍采用原判断，同时处理另一条消息', async t => {

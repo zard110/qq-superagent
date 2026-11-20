@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Store } from '../app/store.mjs'
 import { Runtime } from '../app/runtime.mjs'
 import { key } from '../app/messages.mjs'
-import { routingContext } from '../app/fast-routing.mjs'
+import { classify, routingContext } from '../app/fast-routing.mjs'
 
 function setup(
   t,
@@ -110,6 +110,27 @@ for (const [label, opts, mention, expected] of [
     assert.deepEqual(a.calls, expected)
     assert.equal(a.store.all('out').length, expected.length === 1 ? 0 : 1)
   })
+test('Jev 在 TLS 握手前重置可重连，已发送的请求不重复', async t => {
+  const reset = Object.assign(new Error('Client network socket disconnected before secure TLS connection was established'), {code:'ECONNRESET'})
+  const request = () => classify({base:'https://router.example',key:'test',model:'jev'}, {})
+  let calls = 0
+  const fetch = t.mock.method(globalThis, 'fetch', async () => {
+    if (++calls < 3) throw new TypeError('fetch failed', {cause:reset})
+    return Response.json({answers:{engagement:{choice:'requested'},difficulty:{choice:'quick'}}})
+  })
+  const result = await request()
+  assert.equal(result.jevAttempts, 3)
+  assert.equal(result.lane, 'quick')
+  fetch.mock.mockImplementation(async () => {
+    throw new TypeError('fetch failed', {cause:Object.assign(new Error('socket hang up'), {code:'ECONNRESET'})})
+  })
+  await assert.rejects(request(), /fetch failed/)
+  assert.equal(fetch.mock.callCount(), 4)
+  fetch.mock.mockImplementation(async () => { throw new TypeError('fetch failed', {cause:reset}) })
+  await assert.rejects(request(), /连续三次未能建立连接/)
+  assert.equal(fetch.mock.callCount(), 7)
+})
+
 test('同群其他机器人的普通和 @ 事件去重入历史，后续问题可区分两台机器人', async t => {
   const a = setup(t)
   const self = {id:'self-private', username:'小搭', bot:true, is_you:true}

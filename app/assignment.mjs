@@ -19,7 +19,7 @@ export async function planAssignment(runtime, run) {
         .map((row) => JSON.parse(row.body))
     : []
   const reference = runtime.caps.reference(m)
-  const answer = await model(
+  const requestPlan = () => model(
     provider(store.config(), 'chat'),
     [
       {
@@ -48,6 +48,17 @@ export async function planAssignment(runtime, run) {
     ],
     [],
   )
+  // A rejected planning call has not dispatched a worker or performed any group action.
+  const answer = await requestPlan().catch(async error => {
+    if (error.status !== 503) throw error
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    try {
+      return await requestPlan()
+    } catch (retryError) {
+      if (retryError.status === 503) throw new Error('负责模型暂时不可用（规划接口连续两次返回 HTTP 503）', { cause: retryError })
+      throw retryError
+    }
+  })
   const d = JSON.parse(String(answer.content).replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ''))
   if (!['new', 'continue', 'status', 'stop', 'clarify', 'silent'].includes(d.action))
     throw Error('规划模型未给出有效的任务分配')

@@ -71,7 +71,7 @@ const disposition = {requested:'被请求', proactive:'主动参与', quiet:'要
 function routeSummary(fast) {
   if (!fast) return ''
   return [lanes[fast.lane], ...[['Jev',fast.jevMs],['快答',fast.quickMs],['负责模型',fast.responsibleMs]]
-    .filter(([,ms])=>ms != null).map(([name,ms])=>name+' '+ms+' ms'),fast.fallback].filter(Boolean).join(' · ')
+    .filter(([,ms])=>ms != null).map(([name,ms])=>name+' '+ms+' ms'),fast.jevAttempts > 1 ? 'Jev 连接 ' + fast.jevAttempts + ' 次' : '',fast.fallback].filter(Boolean).join(' · ')
 }
 const val = (id) => $('#' + id).value
 const btn = (id, title) => '<button id="' + id + '">' + title + '</button>'

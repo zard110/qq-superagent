@@ -24,8 +24,24 @@ const difficulty = {
   responsible: '需要工具、实时信息、群历史、原创歌曲、说唱、配音或其他文件制作、复杂推理、查询任务当前进度或是否已交付、修改或续办任务、澄清对象。',
 }
 
+// Retry only connection failures that precede delivery of the HTTP request.
+async function connectJev(url, options) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return { response: await fetch(url, options), attempts: attempt }
+    } catch (error) {
+      const cause = error.cause
+      const beforeSend = ['EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT'].includes(cause?.code)
+        || (cause?.code === 'ECONNRESET' && cause.message?.includes('before secure TLS connection was established'))
+      if (!beforeSend) throw error
+      if (attempt === 3) throw Object.assign(new Error('Jev 连续三次未能建立连接'), { cause: error, attempts: attempt })
+      await new Promise(resolve => setTimeout(resolve, 250 * attempt))
+    }
+  }
+}
+
 export async function classify(jev, state) {
-  const response = await fetch(jev.base, {
+  const { response, attempts } = await connectJev(jev.base, {
     method: 'POST',
     redirect: 'error',
     headers: { Authorization: 'Bearer ' + jev.key, 'Content-Type': 'application/json' },
@@ -73,6 +89,7 @@ export async function classify(jev, state) {
     throw Error('Jev 返回了无效分类')
   const memory = answers?.memory?.choice
   return {
+    jevAttempts: attempts,
     engagement: disposition,
     lane,
     memory: Object.hasOwn(memoryChoices, memory) ? memory : 'none',
@@ -110,12 +127,13 @@ export async function fastRoute(runtime, run, config, { assessOnly = false } = {
     try {
       fast = await classify(jev, state)
     } catch (error) {
-      const reason = /^Jev (HTTP \d{3}|返回了无效分类)$/.test(error.message) ? error.message :
+      const reason = /^Jev (HTTP \d{3}|返回了无效分类|连续三次未能建立连接)$/.test(error.message) ? error.message :
         error instanceof SyntaxError ? 'Jev 响应不是有效 JSON' : 'Jev 请求失败（连接或响应中断）'
       fast = {
         lane: 'responsible',
         engagement: directed ? 'requested' : 'silent',
         fallback: reason,
+        jevAttempts: error.attempts,
       }
     }
   } else {
